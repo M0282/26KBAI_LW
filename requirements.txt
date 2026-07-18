@@ -4,4 +4,5 @@ pydantic>=2
 python-dotenv
 pypdf
 requests
+rank_bm25
 chromadb
