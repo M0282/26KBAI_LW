@@ -1,0 +1,7 @@
+anthropic
+streamlit
+pydantic>=2
+python-dotenv
+pypdf
+requests
+chromadb
