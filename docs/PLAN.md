@@ -70,6 +70,6 @@ main (보호: 직접 푸시 금지, PR로만 머지)
 
 ## 6. 동기화 리추얼
 
-- 작업 시작 전: `git pull origin main` + 열린 Issue/PR 확인 (LLM 세션도 동일 — CLAUDE.md에 명시됨)
+- 작업 시작 전: `git pull origin main` + 열린 Issue/PR 확인 (LLM 세션도 동일 — AGENTS.md에 명시됨, Claude·Codex 공통 적용)
 - 하루 1회 간단 싱크: 오늘 한 것 / 내일 할 것 / 막힌 것 (카톡이든 Issue 코멘트든)
 - 금지: main 직접 푸시, force-push, 상대 브랜치 푸시, .env·API 키 커밋
