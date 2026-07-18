@@ -1,0 +1,27 @@
+# 환경 변수 / 비밀키 — 절대 커밋 금지
+.env
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 데이터 (샘플 소량만 data/samples/ 에 커밋 허용)
+data/regulations/*
+!data/regulations/.gitkeep
+*.db
+chroma/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/worktrees/
