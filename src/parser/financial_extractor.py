@@ -224,6 +224,78 @@ def _extract_json_object(content: str) -> dict:
     return payload
 
 
+def _model_ladder() -> list[str]:
+    """추출 모델 승격 사다리.
+
+    - ANTHROPIC_MODEL 을 명시하면 그 모델만 사용(자동 승격 안 함).
+    - LLM_ESCALATE=0 이면 haiku 단일.
+    - 기본: haiku-4-5 → (실패 시) opus-4-8. sonnet은 실측상 haiku 실패를
+      구제하지 못해 건너뛴다(호출 낭비 방지). '어려운 것만 Opus' 계획과 일치.
+    """
+    forced = os.environ.get("ANTHROPIC_MODEL")
+    if forced:
+        return [forced]
+    if os.environ.get("LLM_ESCALATE", "1") == "0":
+        return ["claude-haiku-4-5"]
+    return ["claude-haiku-4-5", "claude-opus-4-8"]
+
+
+def _is_weak(result: ExtractionResult) -> bool:
+    """저렴한 모델이 명백히 실패했는지(= 승격 필요) 판정.
+
+    분류 실패(unknown)이면서 의미 있는 필드를 하나도 못 뽑은 경우만 승격한다.
+    (부분 추출은 승격하지 않아 불필요한 상위 모델 호출을 막는다)
+    """
+    has_value = any(f.value for f in result.fields)
+    return result.doc_type == "unknown" and not has_value
+
+
+def _attempt_llm(
+    parsed: ParsedDocument, model: str, api_key: str, locator: Locator | None
+) -> ExtractionResult:
+    """단일 모델로 1회 추출 시도. 실패 시 예외를 올린다(상위에서 폴백/승격 처리)."""
+    import anthropic
+
+    from src.common.llm_cache import cached_text, make_key
+
+    prompt = _llm_prompt(parsed.raw_text)
+
+    def _call() -> str:
+        client = anthropic.Anthropic(api_key=api_key)
+        # temperature 미지정: 최신 모델(Sonnet 5·Opus 4.8 등)은 sampling 파라미터를 받지 않는다(400).
+        message = client.messages.create(
+            model=model,
+            max_tokens=1800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(block.text for block in message.content if hasattr(block, "text"))
+
+    # 결과 캐시: 같은 서류+모델이면 API 재호출 없이 저장된 응답 재사용(개발·데모 비용 0)
+    content = cached_text(make_key("extract", model, prompt), _call)
+    payload = _extract_json_object(content)
+    values = payload.get("fields") or {}
+    evidence = payload.get("evidence") or {}
+    fields: list[ParsedField] = []
+    normalized_text = _compact_for_match(parsed.raw_text)
+
+    for name in ALL_FIELD_NAMES:
+        raw_value = values.get(name)
+        excerpt = evidence.get(name)
+        if excerpt is not None:
+            excerpt = str(excerpt).strip()
+        # 환각 방지: 제시한 근거가 원문에 없으면 값과 근거 모두 폐기.
+        if excerpt and _compact_for_match(excerpt) not in normalized_text:
+            raw_value = None
+            excerpt = None
+        value = str(raw_value) if raw_value is not None else None
+        fields.append(_field(name, value, excerpt, 0.95, locator))
+
+    doc_type = str(payload.get("doc_type", "unknown"))
+    if doc_type not in DOC_TYPES and doc_type != "unknown":
+        doc_type = "unknown"
+    return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
+
+
 def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> ExtractionResult:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
@@ -231,56 +303,32 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
         result.warning = "ANTHROPIC_API_KEY가 없어 규칙 기반 추출을 사용했습니다."
         return result
 
-    try:
-        import anthropic
+    ladder = _model_ladder()
+    best: ExtractionResult | None = None
+    last_error: Exception | None = None
+    for i, model in enumerate(ladder):
+        try:
+            result = _attempt_llm(parsed, model, api_key, locator)
+        except Exception as exc:  # 호출/파싱 실패 → 다음 티어 시도
+            last_error = exc
+            continue
+        best = result
+        # 마지막 티어이거나 결과가 충분하면 종료. 약하면 다음(상위) 모델로 승격.
+        if i == len(ladder) - 1 or not _is_weak(result):
+            if i > 0:
+                result.warning = f"저가 모델 추출이 약해 {model}로 승격했습니다."
+            return result
 
-        from src.common.llm_cache import cached_text, make_key
-
-        # 기본은 저렴한 haiku-4-5. 실측상 추출 정확도는 모델 티어보다 프롬프트·정규화
-        # 사전에 더 좌우된다(haiku vs sonnet 차이 작고 방향도 불일치).
-        # → 애매한 문서 대응 1순위는 프롬프트·정규화 개선(무료). 그래도 부족하면
-        #   상위 모델로 승격하되, 그때는 최상위 티어(claude-opus-4-8)가 우리 계획.
-        # temperature 미지정: 최신 모델(Sonnet 5·Opus 4.8 등)은 sampling 파라미터를 받지 않는다(400).
-        model = os.environ.get("ANTHROPIC_MODEL") or "claude-haiku-4-5"
-        prompt = _llm_prompt(parsed.raw_text)
-
-        def _call() -> str:
-            client = anthropic.Anthropic(api_key=api_key)
-            message = client.messages.create(
-                model=model,
-                max_tokens=1800,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return "".join(block.text for block in message.content if hasattr(block, "text"))
-
-        # 결과 캐시: 같은 서류+모델이면 API 재호출 없이 저장된 응답 재사용(개발·데모 비용 0)
-        content = cached_text(make_key("extract", model, prompt), _call)
-        payload = _extract_json_object(content)
-        values = payload.get("fields") or {}
-        evidence = payload.get("evidence") or {}
-        fields: list[ParsedField] = []
-        normalized_text = _compact_for_match(parsed.raw_text)
-
-        for name in ALL_FIELD_NAMES:
-            raw_value = values.get(name)
-            excerpt = evidence.get(name)
-            if excerpt is not None:
-                excerpt = str(excerpt).strip()
-            # 환각 방지: 제시한 근거가 원문에 없으면 값과 근거 모두 폐기.
-            if excerpt and _compact_for_match(excerpt) not in normalized_text:
-                raw_value = None
-                excerpt = None
-            value = str(raw_value) if raw_value is not None else None
-            fields.append(_field(name, value, excerpt, 0.95, locator))
-
-        doc_type = str(payload.get("doc_type", "unknown"))
-        if doc_type not in DOC_TYPES and doc_type != "unknown":
-            doc_type = "unknown"
-        return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
-    except Exception as exc:
-        result = extract_rule_based(parsed, locator=locator)
-        result.warning = f"LLM 추출 실패로 규칙 기반 폴백 사용: {type(exc).__name__}"
-        return result
+    if best is not None:
+        return best
+    # 모든 티어 실패 → 규칙 기반 폴백
+    result = extract_rule_based(parsed, locator=locator)
+    result.warning = (
+        f"LLM 추출 실패로 규칙 기반 폴백 사용: {type(last_error).__name__}"
+        if last_error
+        else "LLM 추출 실패로 규칙 기반 폴백 사용"
+    )
+    return result
 
 
 def extract_document(parsed: ParsedDocument, use_llm: bool = True, locator: Locator | None = None) -> ExtractionResult:
