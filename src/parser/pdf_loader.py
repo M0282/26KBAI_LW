@@ -133,23 +133,48 @@ def _ocr_page(page) -> tuple[str, list["WordBox"]]:
     return text, words
 
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
+
+
+def _open_any(source: str | Path | bytes, document_id: Optional[str]):
+    """PDF/이미지(경로·바이트)를 fitz PDF 문서로 연다.
+
+    이미지(스캔·사진·스크린샷)는 PDF로 변환해서 연다 → 이후 스캔 페이지로 감지되어
+    OCR이 자동 적용된다. 업로더가 PDF뿐 아니라 이미지도 받을 수 있게 한다.
+    """
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        doc_id = document_id or p.stem
+        if p.suffix.lower() in _IMAGE_EXTS:
+            img = fitz.open(str(p))
+            data = img.convert_to_pdf()
+            img.close()
+            return fitz.open(stream=data, filetype="pdf"), doc_id
+        return fitz.open(str(p)), doc_id
+    # bytes
+    doc_id = document_id or "uploaded"
+    if source[:5] == b"%PDF-":
+        return fitz.open(stream=source, filetype="pdf"), doc_id
+    # PDF가 아니면 이미지로 간주 → PDF 변환
+    img = fitz.open(stream=source, filetype="jpg")  # fitz가 실제 이미지 포맷 자동 감지
+    data = img.convert_to_pdf()
+    img.close()
+    return fitz.open(stream=data, filetype="pdf"), doc_id
+
+
 def load_pdf(
     source: str | Path | bytes,
     document_id: Optional[str] = None,
     ocr: str = "auto",
 ) -> PdfDocument:
-    """PDF 경로/바이트 → PdfDocument (텍스트 + 단어 좌표).
+    """PDF/이미지(경로·바이트) → PdfDocument (텍스트 + 단어 좌표).
 
+    이미지는 PDF로 변환 후 처리(스캔 페이지로 감지 → OCR 자동 적용).
     ocr='auto': 텍스트 레이어가 없는 스캔 페이지는 Tesseract가 있으면 OCR로 복원.
     ocr='off': OCR 시도 안 함(스캔본은 scanned=True, 텍스트 비어있음으로 표시).
     스캔본을 조용히 빈 결과로 통과시키지 않고 needs_ocr로 드러내는 것이 목적.
     """
-    if isinstance(source, (str, Path)):
-        doc = fitz.open(source)
-        doc_id = document_id or Path(source).stem
-    else:
-        doc = fitz.open(stream=source, filetype="pdf")
-        doc_id = document_id or "uploaded.pdf"
+    doc, doc_id = _open_any(source, document_id)
 
     pages: list[Page] = []
     image_only = 0

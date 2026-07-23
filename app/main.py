@@ -71,9 +71,10 @@ with st.sidebar:
 
 uploaded = st.file_uploader(
     "판매서류 패키지 업로드",
-    type=["pdf"],
+    type=["pdf", "jpg", "jpeg", "png"],
     accept_multiple_files=True,
-    help="적합성 진단표, 상품설명서, 가입신청서, 설명 확인서를 함께 올리세요.",
+    help="적합성 진단표, 상품설명서, 가입신청서, 설명 확인서를 함께 올리세요. "
+    "PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다.",
 )
 
 if not uploaded:
