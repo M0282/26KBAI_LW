@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
 from src.ingest.articles import extract_admrule_articles, extract_law_articles
+from src.ingest.index import bm25_scores
 from src.ingest.law_api import LawApiClient, LawApiError
 
 
@@ -28,10 +28,6 @@ class LawSearchResult:
         return f"{self.source}{article}"
 
 
-def _tokens(text: str) -> list[str]:
-    return re.findall(r"[가-힣A-Za-z0-9]+", text.lower())
-
-
 def load_article_chunks(directory: str | Path = "data/regulations") -> list[dict]:
     root = Path(directory)
     chunks: list[dict] = []
@@ -48,17 +44,9 @@ def load_article_chunks(directory: str | Path = "data/regulations") -> list[dict
 
 
 def _score_chunks(query: str, corpus: list[dict]) -> list[float]:
-    tokenized = [_tokens(" ".join(str(chunk.get(k, "")) for k in ("source", "title", "text"))) for chunk in corpus]
-    query_tokens = _tokens(query)
-    if not corpus or not query_tokens:
-        return [0.0] * len(corpus)
-    try:
-        from rank_bm25 import BM25Okapi
-
-        return [float(score) for score in BM25Okapi(tokenized).get_scores(query_tokens)]
-    except Exception:
-        query_set = set(query_tokens)
-        return [float(len(query_set.intersection(tokens))) for tokens in tokenized]
+    # index.py의 공용 BM25 스코어러 재사용 (어절+bigram 토크나이저 공유, 중복 제거)
+    texts = [" ".join(str(chunk.get(k, "")) for k in ("source", "title", "text")) for chunk in corpus]
+    return bm25_scores(query, texts)
 
 
 def search_chunks(

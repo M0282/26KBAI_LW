@@ -234,14 +234,23 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
     try:
         import anthropic
 
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
-            max_tokens=1800,
-            temperature=0,
-            messages=[{"role": "user", "content": _llm_prompt(parsed.raw_text)}],
-        )
-        content = "".join(block.text for block in message.content if hasattr(block, "text"))
+        from src.common.llm_cache import cached_text, make_key
+
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        prompt = _llm_prompt(parsed.raw_text)
+
+        def _call() -> str:
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model=model,
+                max_tokens=1800,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(block.text for block in message.content if hasattr(block, "text"))
+
+        # 결과 캐시: 같은 서류+모델이면 API 재호출 없이 저장된 응답 재사용(개발·데모 비용 0)
+        content = cached_text(make_key("extract", model, prompt), _call)
         payload = _extract_json_object(content)
         values = payload.get("fields") or {}
         evidence = payload.get("evidence") or {}
