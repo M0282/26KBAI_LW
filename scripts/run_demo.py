@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ from src.parser.financial_extractor import extract_document
 from src.parser.pdf_loader import load_pdf, to_parsed_document
 from src.verify.ai_reasoner import build_legal_issues
 from src.verify.financial_rules import LAW_HINTS, run_package_checks
+from src.verify.metrics import compute_metrics
 
 DEMO_DIR = Path("data/samples/demo")
 ICON = {"risk": "[위험]", "missing": "[누락]", "warning": "[확인]", "pass": "[적합]"}
@@ -34,6 +36,7 @@ def main(argv: list[str]) -> int:
         print("데모 서류가 없습니다. 먼저: py -3 -m scripts.make_demo_package")
         return 1
 
+    started = time.perf_counter()
     docs: list[ParsedDocument] = []
     for path in pdfs:
         pdf = load_pdf(str(path))
@@ -49,6 +52,7 @@ def main(argv: list[str]) -> int:
 
     checks = run_package_checks(docs)
     issues = build_legal_issues(docs, checks, use_llm=use_llm)
+    metrics = compute_metrics(docs, checks, time.perf_counter() - started)
 
     print(f"=== 데모 검증 리포트 ({'LLM' if use_llm else '오프라인'}) — 서류 {len(docs)}종 ===")
     blockers = sum(c.status in (CheckStatus.RISK, CheckStatus.MISSING) for c in checks)
@@ -70,6 +74,9 @@ def main(argv: list[str]) -> int:
         if c.document_excerpt:
             print(f"   서류 근거: {c.document_excerpt[:70]}")
         print(f"   법령 근거: {cite}")
+
+    print("\n=== 정량 지표 (ROI) ===")
+    print("  " + metrics.summary_line())
     return 0
 
 
