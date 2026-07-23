@@ -2,6 +2,6 @@ anthropic
 streamlit
 pydantic>=2
 python-dotenv
-pypdf
+PyMuPDF
 requests
 chromadb
