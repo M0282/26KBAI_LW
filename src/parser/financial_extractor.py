@@ -129,6 +129,18 @@ def scan_risk_grade(text: str) -> str | None:
     return f"{m.group(1)}등급" if m else None
 
 
+# 적합성 진단표의 투자성향 명시 문구("투자성향은 '위험중립형'", "투자성향 : 안정형").
+# 위험도 범례(직전/최종 투자성향 나열)를 오인하지 않도록 '은' 또는 ':' 뒤만 매칭.
+_PROFILE_SCAN = re.compile(
+    r"투자성향(?:은|\s*[:：])\s*['\"]?\s*(공격투자형|적극투자형|위험중립형|안정추구형|안정형)"
+)
+
+
+def scan_customer_profile(text: str) -> str | None:
+    m = _PROFILE_SCAN.search(text)
+    return m.group(1) if m else None
+
+
 def normalize_field(name: str, value: str | None) -> str | None:
     if value is None:
         return None
@@ -200,13 +212,23 @@ def extract_rule_based(parsed: ParsedDocument, locator: Locator | None = None) -
         evidence = next((phrase for phrase in phrases if _compact_for_match(phrase) in compact_text), None)
         fields.append(_field(name, "확인" if evidence else None, evidence, 0.75, locator))
 
-    # 위험등급: 명시 라벨 스캔을 우선(규칙 정규식보다 신뢰 높음).
+    # 위험등급: 상품설명서에서만 명시 라벨 스캔 우선(진단표 위험도 범례 오인 방지).
     risk_field = next((f for f in fields if f.name == "product_risk_level"), None)
     if risk_field is not None:
-        grade = scan_risk_grade(text)
-        if grade:
-            risk_field.value = grade
-            risk_field.confidence = 0.9
+        if doc_type == "product_description":
+            grade = scan_risk_grade(text)
+            if grade:
+                risk_field.value = grade
+                risk_field.confidence = 0.9
+        else:
+            risk_field.value = None
+    # 투자성향: 적합성 진단표에서 명시 문구 스캔.
+    prof_field = next((f for f in fields if f.name == "customer_profile"), None)
+    if prof_field is not None and doc_type == "suitability_form":
+        prof = scan_customer_profile(text)
+        if prof:
+            prof_field.value = prof
+            prof_field.confidence = 0.9
 
     return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=False)
 
@@ -329,19 +351,29 @@ def _attempt_llm(
             if any(_compact_for_match(p) in normalized_text for p in phrases):
                 f.value = "확인"
                 f.confidence = 0.7
-    # 위험등급: 명시 라벨('위험등급 N등급')을 LLM보다 우선한다.
-    # 실측상 LLM(haiku)이 위험등급을 오추출하는 경우가 잦은 반면(14종 중 4종 오답),
-    # 라벨 스캔은 전부 정확했다. 판정 임계 필드이므로 결정론적 라벨을 권위로 삼는다.
-    rf = by_name.get("product_risk_level")
-    if rf is not None:
-        grade = scan_risk_grade(parsed.raw_text)
-        if grade:
-            rf.value = grade
-            rf.confidence = 0.9
-
     doc_type = str(payload.get("doc_type", "unknown"))
     if doc_type not in DOC_TYPES and doc_type != "unknown":
         doc_type = "unknown"
+
+    # 위험등급: '상품설명서'에서만 명시 라벨을 권위로 삼는다(LLM 오추출 잦음).
+    # 진단표 등은 위험도 범례를 상품등급으로 오인하지 않도록 위험등급을 비운다.
+    rf = by_name.get("product_risk_level")
+    if rf is not None:
+        if doc_type == "product_description":
+            grade = scan_risk_grade(parsed.raw_text)
+            if grade:
+                rf.value = grade
+                rf.confidence = 0.9
+        else:
+            rf.value = None
+    # 투자성향: '적합성 진단표'에서 명시 문구를 권위로 삼는다.
+    pf = by_name.get("customer_profile")
+    if pf is not None and doc_type == "suitability_form":
+        prof = scan_customer_profile(parsed.raw_text)
+        if prof:
+            pf.value = prof
+            pf.confidence = 0.9
+
     return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
 
 
