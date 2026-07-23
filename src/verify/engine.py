@@ -109,22 +109,13 @@ class VerifyEngine:
 
     # ---- LLM 기반: 서류별 의무 충족 판단 ---------------------------------
     def _llm_obligation_checks(self, doc: ParsedDocument) -> list[RuleCheck]:
-        candidate_blocks = []
-        for key, desc in OBLIGATIONS:
-            hits = self.index.search(desc, k=2)
-            for h in hits:
-                candidate_blocks.append(
-                    f"[{h['source']} 제{h['article_no']}조 {h['title']}]\n{h['text'][:400]}"
-                )
-        system = (
-            "당신은 금융소비자보호법 준수 여부를 검토하는 컴플라이언스 보조 AI다. "
-            "주어진 판매 서류가 각 의무를 충족하는지 '서류에 실제로 존재하는 근거'만으로 판단한다. "
-            "근거 문장(evidence_text)은 반드시 서류 원문에서 그대로 인용한다. 지어내지 않는다."
-        )
+        # system = 고정 지시 + 참고 조문 (모든 서류에 동일 → 캐시 프리픽스).
+        # 조문은 OBLIGATIONS·인덱스가 고정이라 매 호출 바이트 동일 → 2회차부터 캐시 적중.
+        system = self._obligation_system_prompt()
+        # prompt = 가변(서류 원문)만. 프리픽스를 깨지 않도록 뒤에 둔다.
         prompt = (
             f"[검토 대상 서류: {doc.doc_type}]\n{doc.raw_text[:6000]}\n\n"
-            f"[참고 조문]\n" + "\n\n".join(candidate_blocks) + "\n\n"
-            "다음 의무별로 충족 여부를 판단하라: "
+            "위 참고 조문을 근거로 다음 의무별 충족 여부를 판단하라: "
             + ", ".join(k for k, _ in OBLIGATIONS)
         )
         try:
@@ -153,6 +144,21 @@ class VerifyEngine:
                 )
             )
         return checks
+
+    def _obligation_system_prompt(self) -> str:
+        """고정 시스템 프롬프트(지시 + 참고 조문). 캐시 프리픽스로 재사용된다."""
+        blocks = []
+        for _key, desc in OBLIGATIONS:
+            for h in self.index.search(desc, k=2):
+                blocks.append(
+                    f"[{h['source']} 제{h['article_no']}조 {h['title']}]\n{h['text'][:400]}"
+                )
+        return (
+            "당신은 금융소비자보호법 준수 여부를 검토하는 컴플라이언스 보조 AI다. "
+            "주어진 판매 서류가 각 의무를 충족하는지 '서류에 실제로 존재하는 근거'만으로 판단한다. "
+            "근거 문장(evidence_text)은 반드시 서류 원문에서 그대로 인용한다. 지어내지 않는다.\n\n"
+            "[참고 조문]\n" + "\n\n".join(blocks)
+        )
 
     # ---- 헬퍼 ------------------------------------------------------------
     @staticmethod

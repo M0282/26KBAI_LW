@@ -36,15 +36,19 @@ class ClaudeClient:
         return f"claude:{self.model}"
 
     def complete_json(self, system: str, prompt: str, schema: dict) -> dict:
+        # 프롬프트 캐싱: system(고정 지시+참고 조문)을 캐시 프리픽스로 둔다.
+        # 같은 조문을 매 서류마다 재사용 → 2회차부터 입력 토큰 ~90% 절감.
+        # 가변 부분(서류 원문)은 messages(뒤쪽)에 두어 프리픽스를 깨지 않게 한다.
         resp = self._client.messages.create(
             model=self.model,
             max_tokens=4000,
-            system=system,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": prompt}],
             output_config={"format": {"type": "json_schema", "schema": schema}},
         )
         if resp.stop_reason == "refusal":
             raise RuntimeError("LLM이 요청을 거부했습니다(refusal).")
+        self.last_usage = resp.usage  # 캐시 적중 확인용
         text = next((b.text for b in resp.content if b.type == "text"), "")
         return json.loads(text)
 
