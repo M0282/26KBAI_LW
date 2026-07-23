@@ -31,3 +31,6 @@ Thumbs.db
 
 # 데모 생성물(스크립트로 재현)
 data/samples/demo/
+
+# 실물 검증용 PDF (다운로드물)
+data/eval/

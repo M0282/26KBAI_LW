@@ -118,13 +118,35 @@ def _normalize_date(value: str) -> str:
     return value
 
 
+_RISK_GRADE_RE = re.compile(r"[1-6]\s*등급")
+# 실물 상품설명서는 "(투자) 위험 등급  N등급(…위험)" 형태로 위험등급을 명시한다.
+# LLM/규칙이 놓쳐도 전체 원문에서 이 패턴으로 보완 추출한다(결정론적·무료).
+_RISK_GRADE_SCAN = re.compile(r"위험\s*등급[^0-9]{0,10}?([1-6])\s*등급")
+
+
+def scan_risk_grade(text: str) -> str | None:
+    m = _RISK_GRADE_SCAN.search(text)
+    return f"{m.group(1)}등급" if m else None
+
+
 def normalize_field(name: str, value: str | None) -> str | None:
     if value is None:
         return None
+    # 판정 임계 필드(투자성향·위험등급)는 표준값으로 인식될 때만 채택한다.
+    # 실물 문서에서 규칙 정규식이 엉뚱한 문장을 매칭해 '쓰레기값'을 내는 것을 차단
+    # → 인식 실패 시 None(빈값)으로 두어 오판 대신 재검토(LLM 승격/미확인)로 넘긴다.
     if name == "customer_profile":
-        return _normalize(value, PROFILE_NORMALIZATION)
+        norm = _normalize(value, PROFILE_NORMALIZATION)
+        return norm if norm in PROFILE_NORMALIZATION else None
     if name == "product_risk_level":
-        return _normalize(value, RISK_NORMALIZATION)
+        norm = _normalize(value, RISK_NORMALIZATION)
+        return norm if (norm in RISK_NORMALIZATION or _RISK_GRADE_RE.search(norm)) else None
+    if name == "product_name":
+        # 조사·접속어로 시작하면 규칙 정규식이 엉뚱한 문장을 잡은 것 → 폐기
+        compact = _compact(value)
+        if compact.startswith(("및 ", "에 ", "의 ", "을 ", "를 ", "이 ", "가 ", "뿐만", "들이 ", "으로 ")):
+            return None
+        return compact
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -177,6 +199,14 @@ def extract_rule_based(parsed: ParsedDocument, locator: Locator | None = None) -
     for name, phrases in SEMANTIC_EXPLANATION_FIELDS.items():
         evidence = next((phrase for phrase in phrases if _compact_for_match(phrase) in compact_text), None)
         fields.append(_field(name, "확인" if evidence else None, evidence, 0.75, locator))
+
+    # 위험등급 보완: 라벨 정규식이 실패해도 "위험 등급 N등급" 패턴으로 채운다.
+    risk_field = next((f for f in fields if f.name == "product_risk_level"), None)
+    if risk_field is not None and risk_field.value is None:
+        grade = scan_risk_grade(text)
+        if grade:
+            risk_field.value = grade
+            risk_field.confidence = 0.7
 
     return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=False)
 
@@ -289,6 +319,23 @@ def _attempt_llm(
             excerpt = None
         value = str(raw_value) if raw_value is not None else None
         fields.append(_field(name, value, excerpt, 0.95, locator))
+
+    # 긴 문서 보완: LLM 프롬프트는 원문을 30k자로 절단하므로 뒷페이지의 설명(원금손실·
+    # 수수료 등)을 놓칠 수 있다. 설명 존재 여부는 전체 원문 구절 스캔으로 보완한다.
+    by_name = {f.name: f for f in fields}
+    for name, phrases in SEMANTIC_EXPLANATION_FIELDS.items():
+        f = by_name.get(name)
+        if f is not None and f.value is None:
+            if any(_compact_for_match(p) in normalized_text for p in phrases):
+                f.value = "확인"
+                f.confidence = 0.7
+    # 위험등급 보완: LLM이 놓쳐도 원문의 "위험 등급 N등급" 패턴으로 채운다.
+    rf = by_name.get("product_risk_level")
+    if rf is not None and rf.value is None:
+        grade = scan_risk_grade(parsed.raw_text)
+        if grade:
+            rf.value = grade
+            rf.confidence = 0.7
 
     doc_type = str(payload.get("doc_type", "unknown"))
     if doc_type not in DOC_TYPES and doc_type != "unknown":
