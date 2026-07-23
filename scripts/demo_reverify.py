@@ -22,7 +22,7 @@ from src.ingest.regulation_version import (
     snapshot_current,
 )
 from src.verify.financial_rules import DEFAULT_PROFILE_MIN_ALLOWED_GRADE, run_package_checks
-from src.verify.reverify import diff_checks
+from src.verify.orchestrator import auto_reverify
 
 
 def main(argv: list[str]) -> int:
@@ -43,7 +43,7 @@ def main(argv: list[str]) -> int:
             mark = "⚠️ 개정 감지" if s.changed else "최신"
             print(f"  {s.source}: 스냅샷 {s.stored_date} / 현행 {s.live_date or '조회실패'} → {mark}")
 
-    print("\n=== 3) 규정 개정 재검증 (적합성 등급 매트릭스 강화 시뮬레이션) ===")
+    print("\n=== 3) 자동 재검증 오케스트레이션 (감지→재수집→재검증→diff) ===")
     # 경계 사례: 위험중립형 고객 ↔ 4등급 상품.
     #  개정 전(위험중립형 허용 4등급): 적합(PASS)
     #  개정 후(강화, 허용 5등급): 4등급은 부적합 → 신규 위반(RISK)
@@ -61,21 +61,21 @@ def main(argv: list[str]) -> int:
     ]
     print("  경계 서류: 위험중립형 고객 ↔ 4등급 상품")
 
-    # 개정 전: 현행 매트릭스
-    before = run_package_checks(borderline)
-    # 개정 후: 위험중립형 허용 등급을 한 단계 강화(더 낮은 위험만 허용)
+    # 직전(개정 전) 검증 결과 = 재검증 비교 기준
+    baseline = run_package_checks(borderline)
+    # 규정 개정을 시뮬레이션(위험중립형 허용 등급 강화)한 정책으로 자동 재검증.
+    # 실제 개정 시엔 policy 없이 auto_reverify가 감지→재수집→재검증을 그대로 수행.
     amended = dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE)
     amended["위험중립형"] = amended["위험중립형"] + 1
-    after = run_package_checks(borderline, profile_min_grade=amended)
+    report = auto_reverify(borderline, baseline, refetch=live, check_live=live, policy=amended)
 
-    diff = diff_checks(before, after)
-    print("  " + diff.summary_line())
-    for c in diff.added:
+    print("  " + report.summary_line())
+    for c in report.diff.added:
         print(f"    + 신규 위반 [{c.status.value}] {c.rule_id}: {c.document_excerpt}")
-    for c in diff.resolved:
+    for c in report.diff.resolved:
         print(f"    - 해소 [{c.status.value}] {c.rule_id}")
-    if not diff.has_change:
-        print("    (이 데모 서류는 강화된 등급 매트릭스에서도 판정이 동일합니다)")
+    if not report.diff.has_change:
+        print("    (판정 변화 없음)")
     return 0
 
 
