@@ -71,6 +71,11 @@ def main(argv: list[str]) -> int:
     for path in paths:
         try:
             pdf = load_pdf(str(path))
+            if pdf.needs_ocr:
+                # 스캔본(텍스트 레이어 없음) — 조용히 통과시키지 않고 명확히 표시
+                print(f"{path.name[:28]:28} {'스캔본':16} {'-':10} {'-':30} ⚠️ OCR필요(수동검토)")
+                fail += 1
+                continue
             res = extract_document(to_parsed_document(pdf), use_llm=use_llm, locator=pdf.locate)
         except Exception as exc:
             print(f"{path.name[:28]:28} [오류: {type(exc).__name__}]")
