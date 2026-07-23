@@ -96,12 +96,35 @@ def _search_page(page: Page, needle: str) -> list[tuple[float, float, float, flo
     return results
 
 
+import os as _os
+
+
+def _find_tessdata() -> str | None:
+    """kor.traineddata가 있는 tessdata 폴더를 자동 탐색.
+
+    한국어 OCR은 kor 데이터가 필요하다. 기본 설치(Program Files/tessdata)엔 보통
+    eng만 있으므로, TESSDATA_PREFIX 또는 사용자 폴더(~/tessdata)를 우선 확인한다.
+    """
+    for d in (
+        _os.environ.get("TESSDATA_PREFIX"),
+        _os.path.expanduser("~/tessdata"),
+        "C:/Program Files/Tesseract-OCR/tessdata",
+    ):
+        if d and _os.path.exists(_os.path.join(d, "kor.traineddata")):
+            return d
+    return None
+
+
 def _ocr_page(page) -> tuple[str, list["WordBox"]]:
-    """Tesseract가 있으면 페이지를 OCR해 텍스트+단어좌표 반환. 없으면 ('', [])."""
+    """Tesseract(+한국어)가 있으면 페이지를 OCR해 텍스트+단어좌표 반환. 없으면 ('', [])."""
+    tessdata = _find_tessdata()
     try:
-        tp = page.get_textpage_ocr(flags=0, language="kor+eng", dpi=200, full=True)
+        kwargs = {"flags": 0, "language": "kor+eng", "dpi": 200, "full": True}
+        if tessdata:
+            kwargs["tessdata"] = tessdata
+        tp = page.get_textpage_ocr(**kwargs)
     except Exception:
-        return "", []  # tesseract 미설치 등 → OCR 불가
+        return "", []  # tesseract/한국어 데이터 미설치 등 → OCR 불가(needs_ocr로 표시됨)
     text = page.get_text("text", textpage=tp)
     words = [
         WordBox(text=w[4], x0=w[0], y0=w[1], x1=w[2], y1=w[3])
