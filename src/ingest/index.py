@@ -35,6 +35,18 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
+def bm25_scores(query: str, corpus_texts: list[str]) -> list[float]:
+    """임의의 텍스트 목록에 대해 BM25 점수를 반환한다(공용 스코어러).
+
+    ArticleIndex(고정 인덱스)와 law_search(실시간 조문 등 동적 코퍼스)가 같은
+    토크나이저(어절+bigram)를 공유하도록 이 함수를 단일 진입점으로 둔다.
+    """
+    if not corpus_texts or not query.strip():
+        return [0.0] * len(corpus_texts)
+    bm25 = BM25Okapi([_tokenize(t) for t in corpus_texts])
+    return [float(s) for s in bm25.get_scores(_tokenize(query))]
+
+
 class ArticleIndex:
     def __init__(self, articles: list[dict]):
         if not articles:

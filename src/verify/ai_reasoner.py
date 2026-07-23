@@ -97,14 +97,22 @@ JSON 객체만 출력하세요.
     try:
         import anthropic
 
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
-            max_tokens=1600,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        content = "".join(block.text for block in message.content if hasattr(block, "text"))
+        from src.common.llm_cache import cached_text, make_key
+
+        # 쟁점 문구 생성은 trivial → 저렴한 haiku 기본. temperature 미지정(최신 모델 호환).
+        model = os.environ.get("ANTHROPIC_MODEL") or "claude-haiku-4-5"
+
+        def _call() -> str:
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model=model,
+                max_tokens=1600,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(block.text for block in message.content if hasattr(block, "text"))
+
+        # 결과 캐시: 같은 쟁점 입력이면 API 재호출 없이 재사용
+        content = cached_text(make_key("reason", model, prompt), _call)
         payload = _json_object(content)
         for item in payload.get("issues", []):
             rule_id = str(item.get("rule_id", ""))
