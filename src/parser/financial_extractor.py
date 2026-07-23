@@ -236,7 +236,11 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
 
         from src.common.llm_cache import cached_text, make_key
 
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        # 추출은 정확도 임계 작업이지만, 실측상 haiku-4-5와 sonnet-5 차이가 작다
+        # (깨끗한 폼은 동일, 애매한 문서는 방향 불일치). 기본은 저렴한 haiku-4-5.
+        # 실제 서류로 추출이 부실하면 ANTHROPIC_MODEL=claude-sonnet-5 로 승격.
+        # temperature 미지정: 최신 모델(Sonnet 5 등)은 sampling 파라미터를 받지 않는다(400).
+        model = os.environ.get("ANTHROPIC_MODEL") or "claude-haiku-4-5"
         prompt = _llm_prompt(parsed.raw_text)
 
         def _call() -> str:
@@ -244,7 +248,6 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
             message = client.messages.create(
                 model=model,
                 max_tokens=1800,
-                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
             return "".join(block.text for block in message.content if hasattr(block, "text"))

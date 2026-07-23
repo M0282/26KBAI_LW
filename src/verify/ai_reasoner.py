@@ -99,14 +99,14 @@ JSON 객체만 출력하세요.
 
         from src.common.llm_cache import cached_text, make_key
 
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        # 쟁점 문구 생성은 trivial → 저렴한 haiku 기본. temperature 미지정(최신 모델 호환).
+        model = os.environ.get("ANTHROPIC_MODEL") or "claude-haiku-4-5"
 
         def _call() -> str:
             client = anthropic.Anthropic(api_key=api_key)
             message = client.messages.create(
                 model=model,
                 max_tokens=1600,
-                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
             return "".join(block.text for block in message.content if hasattr(block, "text"))
