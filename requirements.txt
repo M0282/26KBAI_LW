@@ -6,3 +6,5 @@ PyMuPDF
 requests
 rank_bm25
 chromadb
+
+pytest>=8
