@@ -37,31 +37,45 @@ def _save(name: str, suffix: str, obj) -> Path:
     return path
 
 
+def _fetch_one(client: LawApiClient, name: str, kind: str, query: str) -> int:
+    """단일 규정 수집·저장. 조문 수 반환(검색 실패 시 -1)."""
+    if kind == "law":
+        hits = [h for h in client.search_laws(query) if h.get("법령명한글") == name]
+        if not hits:
+            return -1
+        raw = client.get_law(str(hits[0]["법령일련번호"]))
+        articles = extract_law_articles(raw)
+    else:
+        hits = [h for h in client.search_admrules(query) if h.get("행정규칙명") == name]
+        if not hits:
+            return -1
+        raw = client.get_admrule(str(hits[0]["행정규칙일련번호"]))
+        articles = extract_admrule_articles(raw, source=name)
+    _save(name, "raw", raw)
+    _save(name, "articles", articles)
+    return len(articles)
+
+
+def refetch_source(source: str, client: LawApiClient | None = None) -> int:
+    """개정 감지된 규정 1종을 재수집한다(오케스트레이션용). 조문 수 반환.
+
+    kind는 이름으로 판별(감독규정/규정 → 행정규칙). 검색어는 규정명 자체.
+    """
+    client = client or LawApiClient()
+    kind = "admrule" if ("감독규정" in source or source.endswith("규정")) else "law"
+    return _fetch_one(client, name=source, kind=kind, query=source)
+
+
 def fetch_all() -> None:
     client = LawApiClient()
     total = 0
     for name, kind, query in TARGETS:
-        if kind == "law":
-            hits = [h for h in client.search_laws(query) if h.get("법령명한글") == name]
-            if not hits:
-                print(f"[건너뜀] {name}: 검색 결과 없음")
-                continue
-            raw = client.get_law(str(hits[0]["법령일련번호"]))
-            articles = extract_law_articles(raw)
-        else:
-            hits = [
-                h for h in client.search_admrules(query) if h.get("행정규칙명") == name
-            ]
-            if not hits:
-                print(f"[건너뜀] {name}: 검색 결과 없음")
-                continue
-            raw = client.get_admrule(str(hits[0]["행정규칙일련번호"]))
-            articles = extract_admrule_articles(raw, source=name)
-
-        _save(name, "raw", raw)
-        path = _save(name, "articles", articles)
-        total += len(articles)
-        print(f"[완료] {name}: 조문 {len(articles)}개 → {path}")
+        count = _fetch_one(client, name, kind, query)
+        if count < 0:
+            print(f"[건너뜀] {name}: 검색 결과 없음")
+            continue
+        total += count
+        print(f"[완료] {name}: 조문 {count}개")
 
     print(f"\n총 {total}개 조문 수집 완료")
 
