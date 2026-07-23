@@ -200,13 +200,13 @@ def extract_rule_based(parsed: ParsedDocument, locator: Locator | None = None) -
         evidence = next((phrase for phrase in phrases if _compact_for_match(phrase) in compact_text), None)
         fields.append(_field(name, "확인" if evidence else None, evidence, 0.75, locator))
 
-    # 위험등급 보완: 라벨 정규식이 실패해도 "위험 등급 N등급" 패턴으로 채운다.
+    # 위험등급: 명시 라벨 스캔을 우선(규칙 정규식보다 신뢰 높음).
     risk_field = next((f for f in fields if f.name == "product_risk_level"), None)
-    if risk_field is not None and risk_field.value is None:
+    if risk_field is not None:
         grade = scan_risk_grade(text)
         if grade:
             risk_field.value = grade
-            risk_field.confidence = 0.7
+            risk_field.confidence = 0.9
 
     return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=False)
 
@@ -329,13 +329,15 @@ def _attempt_llm(
             if any(_compact_for_match(p) in normalized_text for p in phrases):
                 f.value = "확인"
                 f.confidence = 0.7
-    # 위험등급 보완: LLM이 놓쳐도 원문의 "위험 등급 N등급" 패턴으로 채운다.
+    # 위험등급: 명시 라벨('위험등급 N등급')을 LLM보다 우선한다.
+    # 실측상 LLM(haiku)이 위험등급을 오추출하는 경우가 잦은 반면(14종 중 4종 오답),
+    # 라벨 스캔은 전부 정확했다. 판정 임계 필드이므로 결정론적 라벨을 권위로 삼는다.
     rf = by_name.get("product_risk_level")
-    if rf is not None and rf.value is None:
+    if rf is not None:
         grade = scan_risk_grade(parsed.raw_text)
         if grade:
             rf.value = grade
-            rf.confidence = 0.7
+            rf.confidence = 0.9
 
     doc_type = str(payload.get("doc_type", "unknown"))
     if doc_type not in DOC_TYPES and doc_type != "unknown":
