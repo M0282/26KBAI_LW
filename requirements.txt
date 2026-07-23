@@ -2,7 +2,7 @@ anthropic
 streamlit
 pydantic>=2
 python-dotenv
-pypdf
+PyMuPDF
 requests
 rank_bm25
 chromadb
