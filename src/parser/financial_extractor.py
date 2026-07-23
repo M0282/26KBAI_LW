@@ -118,13 +118,21 @@ def _normalize_date(value: str) -> str:
     return value
 
 
+_RISK_GRADE_RE = re.compile(r"[1-6]\s*등급")
+
+
 def normalize_field(name: str, value: str | None) -> str | None:
     if value is None:
         return None
+    # 판정 임계 필드(투자성향·위험등급)는 표준값으로 인식될 때만 채택한다.
+    # 실물 문서에서 규칙 정규식이 엉뚱한 문장을 매칭해 '쓰레기값'을 내는 것을 차단
+    # → 인식 실패 시 None(빈값)으로 두어 오판 대신 재검토(LLM 승격/미확인)로 넘긴다.
     if name == "customer_profile":
-        return _normalize(value, PROFILE_NORMALIZATION)
+        norm = _normalize(value, PROFILE_NORMALIZATION)
+        return norm if norm in PROFILE_NORMALIZATION else None
     if name == "product_risk_level":
-        return _normalize(value, RISK_NORMALIZATION)
+        norm = _normalize(value, RISK_NORMALIZATION)
+        return norm if (norm in RISK_NORMALIZATION or _RISK_GRADE_RE.search(norm)) else None
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -289,6 +297,16 @@ def _attempt_llm(
             excerpt = None
         value = str(raw_value) if raw_value is not None else None
         fields.append(_field(name, value, excerpt, 0.95, locator))
+
+    # 긴 문서 보완: LLM 프롬프트는 원문을 30k자로 절단하므로 뒷페이지의 설명(원금손실·
+    # 수수료 등)을 놓칠 수 있다. 설명 존재 여부는 전체 원문 구절 스캔으로 보완한다.
+    by_name = {f.name: f for f in fields}
+    for name, phrases in SEMANTIC_EXPLANATION_FIELDS.items():
+        f = by_name.get(name)
+        if f is not None and f.value is None:
+            if any(_compact_for_match(p) in normalized_text for p in phrases):
+                f.value = "확인"
+                f.confidence = 0.7
 
     doc_type = str(payload.get("doc_type", "unknown"))
     if doc_type not in DOC_TYPES and doc_type != "unknown":
