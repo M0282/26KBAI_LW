@@ -262,10 +262,15 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
-def run_package_checks(documents: list[ParsedDocument]) -> list[RuleCheck]:
+def run_package_checks(
+    documents: list[ParsedDocument],
+    profile_min_grade: dict[str, int] | None = None,
+) -> list[RuleCheck]:
+    # profile_min_grade: 적합성 등급 매트릭스(규정 파라미터). 개정 시 이 값을 바꿔
+    # 재검증하면 판정 변화를 확인할 수 있다(규정 개정 재검증). 기본은 현행 매트릭스.
     checks = [
         check_product_identity(documents),
-        check_suitability(documents),
+        check_suitability(documents, profile_min_grade=profile_min_grade),
         check_dates(documents),
         check_acknowledgement(documents),
     ]
