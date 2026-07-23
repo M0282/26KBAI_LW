@@ -28,3 +28,6 @@ Thumbs.db
 
 # LLM 결과 캐시 (로컬 전용)
 .cache/
+
+# 데모 생성물(스크립트로 재현)
+data/samples/demo/
