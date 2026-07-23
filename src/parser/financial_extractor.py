@@ -119,6 +119,14 @@ def _normalize_date(value: str) -> str:
 
 
 _RISK_GRADE_RE = re.compile(r"[1-6]\s*등급")
+# 실물 상품설명서는 "(투자) 위험 등급  N등급(…위험)" 형태로 위험등급을 명시한다.
+# LLM/규칙이 놓쳐도 전체 원문에서 이 패턴으로 보완 추출한다(결정론적·무료).
+_RISK_GRADE_SCAN = re.compile(r"위험\s*등급[^0-9]{0,10}?([1-6])\s*등급")
+
+
+def scan_risk_grade(text: str) -> str | None:
+    m = _RISK_GRADE_SCAN.search(text)
+    return f"{m.group(1)}등급" if m else None
 
 
 def normalize_field(name: str, value: str | None) -> str | None:
@@ -133,6 +141,12 @@ def normalize_field(name: str, value: str | None) -> str | None:
     if name == "product_risk_level":
         norm = _normalize(value, RISK_NORMALIZATION)
         return norm if (norm in RISK_NORMALIZATION or _RISK_GRADE_RE.search(norm)) else None
+    if name == "product_name":
+        # 조사·접속어로 시작하면 규칙 정규식이 엉뚱한 문장을 잡은 것 → 폐기
+        compact = _compact(value)
+        if compact.startswith(("및 ", "에 ", "의 ", "을 ", "를 ", "이 ", "가 ", "뿐만", "들이 ", "으로 ")):
+            return None
+        return compact
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -185,6 +199,14 @@ def extract_rule_based(parsed: ParsedDocument, locator: Locator | None = None) -
     for name, phrases in SEMANTIC_EXPLANATION_FIELDS.items():
         evidence = next((phrase for phrase in phrases if _compact_for_match(phrase) in compact_text), None)
         fields.append(_field(name, "확인" if evidence else None, evidence, 0.75, locator))
+
+    # 위험등급 보완: 라벨 정규식이 실패해도 "위험 등급 N등급" 패턴으로 채운다.
+    risk_field = next((f for f in fields if f.name == "product_risk_level"), None)
+    if risk_field is not None and risk_field.value is None:
+        grade = scan_risk_grade(text)
+        if grade:
+            risk_field.value = grade
+            risk_field.confidence = 0.7
 
     return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=False)
 
@@ -307,6 +329,13 @@ def _attempt_llm(
             if any(_compact_for_match(p) in normalized_text for p in phrases):
                 f.value = "확인"
                 f.confidence = 0.7
+    # 위험등급 보완: LLM이 놓쳐도 원문의 "위험 등급 N등급" 패턴으로 채운다.
+    rf = by_name.get("product_risk_level")
+    if rf is not None and rf.value is None:
+        grade = scan_risk_grade(parsed.raw_text)
+        if grade:
+            rf.value = grade
+            rf.confidence = 0.7
 
     doc_type = str(payload.get("doc_type", "unknown"))
     if doc_type not in DOC_TYPES and doc_type != "unknown":
