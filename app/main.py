@@ -100,35 +100,83 @@ if not uploaded:
         st.markdown('<div class="kb-card"><h3>③ 근거 기반 판정</h3><p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>', unsafe_allow_html=True)
     st.stop()
 
-started_at = time.perf_counter()  # 정량 지표(처리 시간) 측정 시작
+@st.cache_data(show_spinner=False, max_entries=64)
+def process_document(raw_bytes: bytes, file_name: str, with_llm: bool):
+    """서류 1건 판독·추출. 파일 내용이 같으면 재실행하지 않는다.
+
+    Streamlit은 위젯을 건드릴 때마다 스크립트를 처음부터 다시 돌린다. 캐시가 없으면
+    페이지 선택 하나에도 전체 파이프라인이 재실행돼 실측 10초가 걸렸다(API 비용은
+    결과 캐시 덕에 0이지만 로컬 재계산이 병목).
+    """
+    pdf = load_pdf(raw_bytes, document_id=file_name)
+    parsed = to_parsed_document(pdf)
+    result = extract_document(
+        parsed, use_llm=with_llm, locator=pdf.locate, page_renderer=pdf.render_page
+    )
+    return pdf, parsed.raw_text, result
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def verify_package(document_payloads: tuple[str, ...], with_llm: bool):
+    """패키지 판정·쟁점 생성. 문서 내용이 같으면 재실행하지 않는다."""
+    documents = [ParsedDocument.model_validate_json(p) for p in document_payloads]
+    package_checks = run_package_checks(documents)
+    return package_checks, build_legal_issues(documents, package_checks, use_llm=with_llm)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def legal_basis(query: str, articles: tuple[str, ...], sources: tuple[str, ...], live: bool):
+    return find_legal_basis(
+        query, preferred_articles=articles, preferred_sources=sources,
+        top_k=3, allow_live=live,
+    )
+
+
+READ_ERROR_HINTS = {
+    "EmptyFileError": "빈 파일입니다.",
+    "FileDataError": "PDF가 손상되었거나 형식이 올바르지 않습니다.",
+    "FzErrorFormat": "지원하지 않는 파일 형식입니다(PDF·JPG·PNG만 가능).",
+}
+
+started_at = time.perf_counter()
 pdf_details = {}
 pdf_bytes_map = {}
 parsed_documents: list[ParsedDocument] = []
 extraction_meta = {}
 errors: list[str] = []
-for file in uploaded:
+seen_names: set[str] = set()
+
+progress = st.progress(0.0, text="서류를 판독하는 중…")
+for index, file in enumerate(uploaded, start=1):
+    # 같은 이름이 두 번 올라오면 dict 키가 겹쳐 한 건이 조용히 사라진다.
+    name = file.name
+    if name in seen_names:
+        suffix = 2
+        while f"{name} ({suffix})" in seen_names:
+            suffix += 1
+        name = f"{name} ({suffix})"
+    seen_names.add(name)
+
+    progress.progress((index - 1) / len(uploaded), text=f"[{index}/{len(uploaded)}] {name} 판독 중…")
     try:
         raw_bytes = file.getvalue()
-        pdf = load_pdf(raw_bytes, document_id=file.name)
-        parsed = to_parsed_document(pdf)
-        result = extract_document(
-            parsed, use_llm=use_llm, locator=pdf.locate, page_renderer=pdf.render_page
-        )
-        enriched = ParsedDocument(
-            document_id=parsed.document_id,
-            doc_type=result.doc_type,
-            fields=result.fields,
-            raw_text=parsed.raw_text,
-        )
-        pdf_details[file.name] = pdf
-        pdf_bytes_map[file.name] = raw_bytes
-        extraction_meta[file.name] = result
-        parsed_documents.append(enriched)
+        pdf, raw_text, result = process_document(raw_bytes, name, use_llm)
+        parsed_documents.append(ParsedDocument(
+            document_id=name, doc_type=result.doc_type, fields=result.fields, raw_text=raw_text,
+        ))
+        pdf_details[name] = pdf
+        pdf_bytes_map[name] = raw_bytes
+        extraction_meta[name] = result
     except Exception as exc:
-        errors.append(f"{file.name}: {type(exc).__name__} - {exc}")
+        hint = READ_ERROR_HINTS.get(type(exc).__name__, "")
+        errors.append(f"{name}: {hint or f'{type(exc).__name__} - {exc}'}")
+progress.empty()
 
 if errors:
-    st.error("일부 문서를 읽지 못했습니다.\n\n" + "\n".join(errors))
+    st.error(
+        f"{len(errors)}개 문서를 읽지 못했습니다. **아래 판정은 나머지 "
+        f"{len(parsed_documents)}건만 반영합니다.**\n\n" + "\n\n".join(f"- {e}" for e in errors)
+    )
 if not parsed_documents:
     st.stop()
 
@@ -165,8 +213,10 @@ for index, document in enumerate(parsed_documents):
         else:
             st.caption("추출된 핵심 필드 없음")
 
-checks = run_package_checks(parsed_documents)
-issues = build_legal_issues(parsed_documents, checks, use_llm=use_llm)
+with st.spinner("패키지 교차 검증 중…"):
+    checks, issues = verify_package(
+        tuple(document.model_dump_json() for document in parsed_documents), use_llm
+    )
 
 st.subheader("2. 패키지 교차 검증·법령 근거")
 summary_counts = {status: sum(check.status == status for check in checks) for status in CheckStatus}
@@ -182,16 +232,14 @@ for check in checks:
         st.markdown(f"**판정:** <span style='color:{color};font-weight:800'>{label}</span>", unsafe_allow_html=True)
         if check.document_excerpt:
             st.markdown(f'<div class="kb-evidence"><b>서류 근거</b><br>{html.escape(check.document_excerpt)}</div>', unsafe_allow_html=True)
-        st.markdown(f"**AI/폴백 쟁점 설명:** {html.escape(issue.rationale)}")
+        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다(같은 자리에 성격이 다른 두 가지가 온다).
+        source_label = "AI 쟁점 설명" if issue.used_llm else "규칙 기반 설명(LLM 미사용)"
+        st.markdown(f"**{source_label}:** {html.escape(issue.rationale)}")
         st.info(issue.recommended_action)
 
         hint = LAW_HINTS[check.rule_id]
-        legal_results = find_legal_basis(
-            issue.search_query,
-            preferred_articles=hint.preferred_articles,
-            preferred_sources=hint.preferred_sources,
-            top_k=3,
-            allow_live=live_law,
+        legal_results = legal_basis(
+            issue.search_query, hint.preferred_articles, hint.preferred_sources, live_law
         )
         if legal_results:
             st.markdown("**관련 법령 원문 후보** (검색 상위 3건, 첫 번째가 최우선 근거)")
@@ -206,7 +254,13 @@ for check in checks:
             st.warning("법령 청크가 없습니다. `python -m src.ingest.fetch_regulations` 실행 또는 LAW_API_OC 설정이 필요합니다.")
 
 st.subheader("3. 정량 지표")
-metrics = compute_metrics(parsed_documents, checks, time.perf_counter() - started_at)
+# 캐시 도입 후 재실행 시간은 0에 가깝다. 지표에는 '첫 처리 시간'을 유지해야
+# 수작업 대비 절감이 정직한 숫자가 된다(위젯을 누를 때마다 0.1초로 바뀌면 안 된다).
+package_key = "|".join(sorted(document.document_id for document in parsed_documents))
+first_elapsed = st.session_state.setdefault(
+    f"elapsed::{package_key}", time.perf_counter() - started_at
+)
+metrics = compute_metrics(parsed_documents, checks, first_elapsed)
 saved_seconds = max(metrics.manual_baseline_seconds - metrics.elapsed_seconds, 0)
 metric_row = st.columns(4)
 metric_row[0].metric("검증 문서", f"{metrics.document_count}건")
