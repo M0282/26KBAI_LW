@@ -132,6 +132,23 @@ def legal_basis(query: str, articles: tuple[str, ...], sources: tuple[str, ...],
     )
 
 
+def FIELD_SOURCE_LABEL(field) -> str:
+    """추출값의 근거를 사람이 읽을 수 있게. 신뢰도는 추출 단계가 매긴 값이다.
+
+    0.9 결정론적 스캔 / 0.85 이미지 판독 / 0.7 원문 대조·의미 매칭 / 0.0 폐기.
+    """
+    if not field.value:
+        return "—"
+    confidence = field.confidence or 0.0
+    if confidence >= 0.9:
+        return "규칙 확정"
+    if confidence >= 0.8:
+        return f"AI 이미지 판독{f' ({field.page}쪽)' if field.page else ''}"
+    if confidence >= 0.5:
+        return "원문 대조"
+    return "AI 추출"
+
+
 READ_ERROR_HINTS = {
     "EmptyFileError": "빈 파일입니다.",
     "FileDataError": "PDF가 손상되었거나 형식이 올바르지 않습니다.",
@@ -206,10 +223,18 @@ for index, document in enumerate(parsed_documents):
             st.caption(meta.warning)
         # 값이 있는 필드만 보여주면 같은 양식인데 목록이 달라 보인다.
         # 유형별 고정 필드를 전부 표시하고 못 찾은 것은 '미확인'으로 드러낸다.
-        values = {name: (value or "미확인") for name, value in field_map(document).items()}
-        # 조건식으로 쓰면 그 결과(DeltaGenerator)가 Streamlit magic으로 화면에 덤프된다.
-        if values:
-            st.json(values, expanded=False)
+        # 근거(신뢰도)도 함께 보여준다 — 규칙이 확정한 값과 AI가 그림에서 읽은 값이
+        # 똑같이 생기면 검토자가 무엇을 더 확인해야 할지 알 수 없다.
+        rows = [
+            {
+                "항목": field.name,
+                "값": field.value or "미확인",
+                "근거": FIELD_SOURCE_LABEL(field),
+            }
+            for field in document.fields
+        ]
+        if rows:
+            st.dataframe(rows, hide_index=True, use_container_width=True)
         else:
             st.caption("추출된 핵심 필드 없음")
 
@@ -220,6 +245,23 @@ with st.spinner("패키지 교차 검증 중…"):
 
 st.subheader("2. 패키지 교차 검증·법령 근거")
 summary_counts = {status: sum(check.status == status for check in checks) for status in CheckStatus}
+
+# 숫자 4개만 보여주면 "그래서 이 판매건은 어떤 상태인가"에 답하지 못한다.
+blockers = summary_counts[CheckStatus.RISK] + summary_counts[CheckStatus.MISSING]
+if summary_counts[CheckStatus.RISK]:
+    st.error(f"**판매 진행 부적합** — 위반 소지 {summary_counts[CheckStatus.RISK]}건이 확인됐습니다. 아래 근거를 검토하세요.")
+elif blockers:
+    st.warning(f"**추가 증빙 필요** — 확인하지 못한 항목 {blockers}건이 있습니다.")
+elif summary_counts[CheckStatus.WARNING]:
+    st.info(f"**조건부 적합** — 위반은 없으나 확인 권고 {summary_counts[CheckStatus.WARNING]}건이 있습니다.")
+else:
+    st.success("**검사 항목 전부 적합** — 아래 검사 범위 내에서 문제가 발견되지 않았습니다.")
+
+# 검사 범위를 밝히지 않으면 '통과'가 '금소법 준수'로 읽힌다.
+st.caption(
+    "검사 범위: **금융소비자보호법 제17조(적합성원칙)·제19조(설명의무)** 관련 5개 항목. "
+    "적정성(18조)·불공정영업(20조)·부당권유(21조)·광고(22조)는 이 도구의 검사 대상이 아닙니다."
+)
 metric_cols = st.columns(4)
 for col, status in zip(metric_cols, [CheckStatus.PASS, CheckStatus.WARNING, CheckStatus.MISSING, CheckStatus.RISK]):
     label, _ = STATUS_LABEL[status]
