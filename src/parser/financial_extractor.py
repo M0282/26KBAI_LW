@@ -240,13 +240,8 @@ _VISION_GRADE_PROMPT = (
 )
 
 
-def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
-    """페이지 이미지에서 부여된 위험등급을 읽는다(텍스트에 값이 없을 때만 호출).
-
-    실측: 은행 핵심요약설명서는 위험등급을 범례표 체크(✓)로만 표시해
-    텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
-    결과 캐시로 같은 페이지 재호출은 0원. VISION_OCR=0이면 비활성.
-    """
+def _vision_ask(image_bytes: bytes, prompt: str, tag: str, max_tokens: int = 16) -> str | None:
+    """페이지 이미지에 짧은 질문을 던진다. 결과 캐시로 같은 페이지 재호출은 0원."""
     if os.environ.get("VISION_OCR", "1") == "0" or not os.environ.get("ANTHROPIC_API_KEY"):
         return None
     try:
@@ -259,13 +254,13 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
     except Exception:
         return None
     model = os.environ.get("VISION_MODEL", "claude-haiku-4-5")
-    key = make_key("vision-grade", model, hashlib.sha256(image_bytes).hexdigest())
+    key = make_key(tag, model, hashlib.sha256(image_bytes).hexdigest())
 
     def _produce() -> str:
         client = anthropic.Anthropic()
         message = client.messages.create(
             model=model,
-            max_tokens=16,
+            max_tokens=max_tokens,
             messages=[{
                 "role": "user",
                 "content": [
@@ -273,18 +268,54 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
                         "type": "base64", "media_type": "image/jpeg",
                         "data": base64.standard_b64encode(image_bytes).decode(),
                     }},
-                    {"type": "text", "text": _VISION_GRADE_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }],
         )
         return "".join(b.text for b in message.content if b.type == "text")
 
     try:
-        answer = cached_text(key, _produce)
+        return cached_text(key, _produce)
     except Exception:
         return None
+
+
+def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
+    """페이지 이미지에서 부여된 위험등급을 읽는다(텍스트에 값이 없을 때만 호출).
+
+    실측: 은행 핵심요약설명서는 위험등급을 범례표 체크(✓)로만 표시해
+    텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
+    """
+    answer = _vision_ask(image_bytes, _VISION_GRADE_PROMPT, "vision-grade")
     m = re.search(r"[1-6]", answer or "")
     return f"{m.group(0)}등급" if m else None
+
+
+_VISION_SIGNATURE_PROMPT = (
+    "이 페이지에 고객(저축자·투자자)의 서명 또는 기명날인이 실제로 기재되어 있습니까? "
+    "개인정보는 절대 출력하지 마세요. 서명란이 있고 채워져 있으면 '기재됨', "
+    "서명란은 있으나 비어 있으면 '공란', 서명란 자체가 없으면 '서명란없음'. "
+    "이 셋 중 하나만 출력하세요."
+)
+
+SIGNED = "확인(서명 기재)"
+UNSIGNED = "미서명"
+
+
+def vision_scan_signature(image_bytes: bytes) -> str | None:
+    """페이지에 고객 서명이 실제로 기재됐는지 본다.
+
+    실측: 계약서의 '서명' 언급은 전부 약관 조문이고 서명란은 텍스트상 공란인데
+    LLM은 그 문구만 읽고 customer_acknowledgement=True를 냈다. 서명이 실제로는
+    2쪽에 그림으로 있었으므로 결과는 맞았지만 근거가 틀렸다 — 미서명 서류였어도
+    똑같이 True가 나왔을 것이고, 그건 ACK-001이 잡아야 할 위반이다.
+    """
+    answer = (_vision_ask(image_bytes, _VISION_SIGNATURE_PROMPT, "vision-sign") or "").strip()
+    if "기재" in answer:
+        return SIGNED
+    if "공란" in answer:
+        return UNSIGNED
+    return None  # 서명란없음 / 판독 실패
 
 
 def grade_supported_by_text(grade: str | None, text: str) -> bool:
@@ -662,6 +693,45 @@ def _fill_risk_grade_from_vision(
             return
 
 
+_ACK_DOC_TYPES = ("application", "acknowledgement", "suitability_form")
+_VISION_SIGN_MAX_PAGES = 4  # 서명란은 보통 앞·뒤 몇 쪽 안에 있다. 비용 상한.
+
+
+def _verify_acknowledgement_with_vision(
+    result: ExtractionResult, renderer: PageRenderer
+) -> None:
+    """고객확인 값을 '서명이 실제로 있는가'로 대체한다.
+
+    텍스트에서 뽑은 True는 약관 문구를 읽은 결과일 수 있어 서명 유무를 구분하지
+    못한다. 한 쪽이라도 서명이 기재돼 있으면 확인, 서명란이 있는데 전부 비어
+    있으면 미서명(ACK-001이 위험으로 잡는다), 서명란이 없으면 미확인으로 둔다.
+    """
+    if result.doc_type not in _ACK_DOC_TYPES:
+        return
+    field = next((f for f in result.fields if f.name == "customer_acknowledgement"), None)
+    if field is None:
+        return
+    verdict: str | None = None
+    for page_number in range(1, _VISION_SIGN_MAX_PAGES + 1):
+        image = renderer(page_number)
+        if not image:
+            break
+        answer = vision_scan_signature(image)
+        if answer == SIGNED:
+            verdict = SIGNED
+            field.page = page_number
+            break
+        if answer == UNSIGNED:
+            verdict = UNSIGNED  # 계속 보되, 뒤에서 서명을 찾으면 그쪽이 우선
+    if verdict is not None:
+        field.value = verdict
+        field.confidence = 0.85
+    elif field.value:
+        # 서명란을 찾지 못했는데 텍스트만 보고 True를 낸 값은 근거가 없다.
+        field.value = None
+        field.confidence = 0.0
+
+
 def extract_document(
     parsed: ParsedDocument,
     use_llm: bool = True,
@@ -674,6 +744,7 @@ def extract_document(
     # 텍스트에 값이 없고 그림에만 있는 위험등급(체크표시 양식)을 마지막으로 보완한다.
     if page_renderer is not None:
         _fill_risk_grade_from_vision(result, parsed, page_renderer)
+        _verify_acknowledgement_with_vision(result, page_renderer)
     # 마지막에 유형별 고정 스키마로 맞춘다 — 같은 양식이면 같은 필드 목록이 나온다.
     apply_doc_type_schema(result)
     return result

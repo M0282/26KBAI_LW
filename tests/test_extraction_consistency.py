@@ -106,3 +106,39 @@ def test_unrelated_product_name_is_discarded():
     from src.parser.financial_extractor import ground_product_name
 
     assert ground_product_name("삼성전자 우선주 ETF 상장지수펀드", ELS_TEXT) is None
+
+
+# --- 고객확인은 '서명이 실제로 있는가'로 판정한다 (ACK-001) ---
+# 실측: 계약서의 '서명' 언급은 전부 약관 조문이고 서명란은 텍스트상 공란인데
+# LLM은 그 문구만 읽고 True를 냈다. 서명이 2쪽에 그림으로 있어 결과는 맞았지만,
+# 미서명 서류였어도 똑같이 True가 나왔을 것이다.
+def test_unsigned_document_is_flagged_as_risk():
+    from src.common.schemas import CheckStatus, ParsedField
+    from src.parser.financial_extractor import UNSIGNED
+    from src.verify.financial_rules import check_acknowledgement
+
+    docs = [ParsedDocument(
+        document_id="c", doc_type="application", raw_text="x",
+        fields=[ParsedField(name="customer_acknowledgement", value=UNSIGNED, confidence=1.0)],
+    )]
+    assert check_acknowledgement(docs).status is CheckStatus.RISK
+
+
+def test_signed_document_is_not_treated_as_negative():
+    from src.common.schemas import CheckStatus, ParsedField
+    from src.parser.financial_extractor import SIGNED
+    from src.verify.financial_rules import check_acknowledgement
+
+    docs = [ParsedDocument(
+        document_id="c", doc_type="application", raw_text="x",
+        fields=[ParsedField(name="customer_acknowledgement", value=SIGNED, confidence=1.0)],
+    )]
+    assert check_acknowledgement(docs).status is not CheckStatus.RISK
+
+
+def test_missing_acknowledgement_is_missing_not_pass():
+    from src.common.schemas import CheckStatus
+    from src.verify.financial_rules import check_acknowledgement
+
+    docs = [ParsedDocument(document_id="c", doc_type="application", raw_text="x", fields=[])]
+    assert check_acknowledgement(docs).status is CheckStatus.MISSING
