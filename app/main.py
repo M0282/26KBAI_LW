@@ -219,8 +219,11 @@ st.caption(
     "판정은 결정론적 규칙이 내리므로 같은 서류·같은 정책이면 언제나 같은 결과입니다."
 )
 
-st.subheader("4. 규정 개정 재검증")
-st.caption("규정이 개정되면 같은 서류의 판정이 달라질 수 있습니다. 정책을 바꿔 즉시 재검증합니다.")
+st.subheader("4. 적합성 정책 변경 시뮬레이션")
+st.caption(
+    "내부 적합성 매트릭스를 조이거나 풀면 **이미 검증한 이 건이 어떻게 바뀌는지** 즉시 보여줍니다. "
+    "정책을 바꾸는 것만으로는 알 수 없는, '기존 판매건 중 무엇이 부적합이 되는가'를 확인하는 용도입니다."
+)
 policy_cols = st.columns(len(DEFAULT_PROFILE_MIN_ALLOWED_GRADE))
 revised_policy = {}
 for col, (profile_name, minimum) in zip(policy_cols, DEFAULT_PROFILE_MIN_ALLOWED_GRADE.items()):
