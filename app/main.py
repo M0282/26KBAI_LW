@@ -7,10 +7,15 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# .env를 읽지 않으면 키가 있어도 LLM·비전·법령 API가 전부 조용히 꺼진 채 동작한다.
+# (스캔 이미지가 OCR 오독 그대로 판정되는 원인이었음) — 실제 환경변수가 우선.
+load_dotenv(ROOT / ".env", override=False)
 
 from src.common.schemas import CheckStatus, ParsedDocument
 from src.ingest.law_search import find_legal_basis
@@ -142,7 +147,11 @@ for index, document in enumerate(parsed_documents):
         if meta.warning:
             st.caption(meta.warning)
         values = {name: value for name, value in field_map(document).items() if value}
-        st.json(values, expanded=False) if values else st.caption("추출된 핵심 필드 없음")
+        # 조건식으로 쓰면 그 결과(DeltaGenerator)가 Streamlit magic으로 화면에 덤프된다.
+        if values:
+            st.json(values, expanded=False)
+        else:
+            st.caption("추출된 핵심 필드 없음")
 
 checks = run_package_checks(parsed_documents)
 issues = build_legal_issues(parsed_documents, checks, use_llm=use_llm)
