@@ -74,7 +74,8 @@ uploaded = st.file_uploader(
     type=["pdf", "jpg", "jpeg", "png"],
     accept_multiple_files=True,
     help="적합성 진단표, 상품설명서, 가입신청서, 설명 확인서를 함께 올리세요. "
-    "PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다.",
+    "PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
+    "OCR이 흐릿한 사진·다크모드 화면을 못 읽으면 AI 비전 판독으로 자동 전환합니다.",
 )
 
 if not uploaded:
@@ -124,11 +125,18 @@ for index, document in enumerate(parsed_documents):
     label = DOC_TYPES.get(document.doc_type, ("분류 불가", []))[0]
     meta = extraction_meta[document.document_id]
     mode = "LLM" if meta.used_llm else "규칙 폴백"
+    source_pdf = pdf_details[document.document_id]
+    if source_pdf.vision_applied:
+        read_mode = "AI 비전 판독"  # Tesseract가 못 읽어 LLM 비전으로 전사
+    elif source_pdf.ocr_applied:
+        read_mode = "OCR"
+    else:
+        read_mode = "텍스트 레이어"
     with columns[index % len(columns)]:
         st.markdown(
             f'<div class="kb-card"><b>{html.escape(document.document_id)}</b><br>'
             f'<span style="color:{KB_YELLOW_ALT};font-weight:800">{label}</span><br>'
-            f'<small>추출 방식: {mode}</small></div>',
+            f'<small>판독: {read_mode} · 추출 방식: {mode}</small></div>',
             unsafe_allow_html=True,
         )
         if meta.warning:

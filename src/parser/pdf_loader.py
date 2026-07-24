@@ -47,6 +47,7 @@ class PdfDocument:
     pages: list[Page]
     scanned: bool = False        # 텍스트 레이어 없는 스캔본(이미지) 여부
     ocr_applied: bool = False     # OCR로 텍스트를 복원했는지
+    vision_applied: bool = False  # Tesseract가 못 읽어 LLM 비전으로 전사했는지
 
     @property
     def text(self) -> str:
@@ -133,6 +134,65 @@ def _ocr_page(page) -> tuple[str, list["WordBox"]]:
     return text, words
 
 
+_VISION_PROMPT = (
+    "이 문서 이미지의 텍스트를 있는 그대로 전사(transcribe)하세요. "
+    "설명·요약·추측 없이 문서에 실제로 보이는 텍스트만 출력하세요. "
+    "보이지 않는 내용은 절대 지어내지 마세요."
+)
+
+
+def _vision_ocr(page) -> str:
+    """Tesseract가 못 읽는 이미지를 LLM 비전으로 전사한다 (OCR 폴백).
+
+    다크모드 스크린샷·저해상도 사진·장식 폰트에서 Tesseract는 한글을 자주 틀린다
+    (예: '투자성향'→'투자성양', '적극투자형'→'적극투자영'). 이때만 비전을 호출한다.
+
+    비용 규칙: 결과 캐시(내용 해시)로 재호출 0원, 일반 PDF는 이 경로에 오지 않는다.
+    이미지 1장 ≈ 1.6k 토큰(haiku 기준 수 원). VISION_OCR=0 으로 끌 수 있다.
+    반환값은 텍스트뿐 — 좌표가 없으므로 하이라이트는 Tesseract 좌표를 그대로 쓴다.
+    """
+    if _os.environ.get("VISION_OCR", "1") == "0" or not _os.environ.get("ANTHROPIC_API_KEY"):
+        return ""
+    try:
+        import base64
+        import hashlib
+
+        import anthropic
+
+        from src.common.llm_cache import cached_text, make_key
+    except Exception:
+        return ""
+    try:
+        data = page.get_pixmap(dpi=150).tobytes("jpeg")
+    except Exception:
+        return ""
+    model = _os.environ.get("VISION_MODEL", "claude-haiku-4-5")
+    key = make_key("vision-ocr", model, hashlib.sha256(data).hexdigest())
+
+    def _produce() -> str:
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/jpeg",
+                        "data": base64.standard_b64encode(data).decode(),
+                    }},
+                    {"type": "text", "text": _VISION_PROMPT},
+                ],
+            }],
+        )
+        return "".join(b.text for b in message.content if b.type == "text")
+
+    try:
+        return cached_text(key, _produce)
+    except Exception:
+        return ""  # 키 오류·네트워크 실패 → Tesseract 결과 유지
+
+
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 
 
@@ -141,6 +201,9 @@ def _open_any(source: str | Path | bytes, document_id: Optional[str]):
 
     이미지(스캔·사진·스크린샷)는 PDF로 변환해서 연다 → 이후 스캔 페이지로 감지되어
     OCR이 자동 적용된다. 업로더가 PDF뿐 아니라 이미지도 받을 수 있게 한다.
+
+    세 번째 반환값은 '원본이 이미지였는지'다. 사진·스크린샷은 Tesseract 정확도가
+    특히 낮아(다크모드·장식 폰트) 비전 폴백 판단에 쓴다.
     """
     if isinstance(source, (str, Path)):
         p = Path(source)
@@ -149,17 +212,17 @@ def _open_any(source: str | Path | bytes, document_id: Optional[str]):
             img = fitz.open(str(p))
             data = img.convert_to_pdf()
             img.close()
-            return fitz.open(stream=data, filetype="pdf"), doc_id
-        return fitz.open(str(p)), doc_id
+            return fitz.open(stream=data, filetype="pdf"), doc_id, True
+        return fitz.open(str(p)), doc_id, False
     # bytes
     doc_id = document_id or "uploaded"
     if source[:5] == b"%PDF-":
-        return fitz.open(stream=source, filetype="pdf"), doc_id
+        return fitz.open(stream=source, filetype="pdf"), doc_id, False
     # PDF가 아니면 이미지로 간주 → PDF 변환
     img = fitz.open(stream=source, filetype="jpg")  # fitz가 실제 이미지 포맷 자동 감지
     data = img.convert_to_pdf()
     img.close()
-    return fitz.open(stream=data, filetype="pdf"), doc_id
+    return fitz.open(stream=data, filetype="pdf"), doc_id, True
 
 
 def load_pdf(
@@ -170,15 +233,17 @@ def load_pdf(
     """PDF/이미지(경로·바이트) → PdfDocument (텍스트 + 단어 좌표).
 
     이미지는 PDF로 변환 후 처리(스캔 페이지로 감지 → OCR 자동 적용).
-    ocr='auto': 텍스트 레이어가 없는 스캔 페이지는 Tesseract가 있으면 OCR로 복원.
-    ocr='off': OCR 시도 안 함(스캔본은 scanned=True, 텍스트 비어있음으로 표시).
+    ocr='auto': 텍스트 레이어가 없는 스캔 페이지는 Tesseract가 있으면 OCR로 복원하고,
+        Tesseract가 실패(빈 결과)하거나 원본이 사진·스크린샷이면 LLM 비전으로 전사한다.
+    ocr='off': OCR·비전 모두 시도 안 함(스캔본은 scanned=True, 텍스트 비어있음).
     스캔본을 조용히 빈 결과로 통과시키지 않고 needs_ocr로 드러내는 것이 목적.
     """
-    doc, doc_id = _open_any(source, document_id)
+    doc, doc_id, from_image = _open_any(source, document_id)
 
     pages: list[Page] = []
     image_only = 0
     ocr_applied = False
+    vision_applied = False
     try:
         for i, page in enumerate(doc, start=1):
             text = page.get_text("text")
@@ -193,6 +258,13 @@ def load_pdf(
                     otext, owords = _ocr_page(page)
                     if otext.strip():
                         text, words, ocr_applied = otext, owords, True
+                    # Tesseract가 아예 못 읽었거나, 원본이 사진·스크린샷이라
+                    # 오독 위험이 큰 경우에만 비전 전사로 텍스트를 대체한다.
+                    # 좌표(words)는 Tesseract 것을 그대로 둔다(비전은 좌표를 주지 않음).
+                    if not otext.strip() or from_image:
+                        vtext = _vision_ocr(page)
+                        if len(vtext.strip()) > len(text.strip()) // 2:
+                            text, vision_applied = vtext, True
             pages.append(Page(number=i, text=text, words=words))
     finally:
         doc.close()
@@ -201,7 +273,13 @@ def load_pdf(
     # (정상 문서에 차트 이미지 페이지가 한둘 섞인 경우를 스캔본으로 오판하지 않도록)
     total_text = sum(len(p.text.strip()) for p in pages)
     scanned = bool(pages) and (image_only >= max(1, len(pages) * 0.5) or total_text < 50)
-    return PdfDocument(document_id=doc_id, pages=pages, scanned=scanned, ocr_applied=ocr_applied)
+    return PdfDocument(
+        document_id=doc_id,
+        pages=pages,
+        scanned=scanned,
+        ocr_applied=ocr_applied,
+        vision_applied=vision_applied,
+    )
 
 
 def to_parsed_document(
