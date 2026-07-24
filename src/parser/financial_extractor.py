@@ -612,6 +612,20 @@ def _attempt_llm(
     if confident and confident != doc_type:
         doc_type = confident
 
+    result = ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
+    _apply_doc_type_gating(result, parsed)
+    return result
+
+
+def _apply_doc_type_gating(result: ExtractionResult, parsed: ParsedDocument) -> None:
+    """문서유형에 따라 값의 채택·폐기를 결정한다.
+
+    유형이 바뀌면(사용자 교정 포함) 이 규칙을 다시 적용해야 한다.
+    유형별로 '그 서류에 있을 수 없는 값'을 비우는 것이 핵심이다.
+    """
+    doc_type = result.doc_type
+    by_name = {f.name: f for f in result.fields}
+
     # 위험등급: '상품설명서'에서만 명시 라벨을 권위로 삼는다(LLM 오추출 잦음).
     # 진단표 등은 위험도 범례를 상품등급으로 오인하지 않도록 위험등급을 비운다.
     rf = by_name.get("product_risk_level")
@@ -652,8 +666,6 @@ def _attempt_llm(
         if prof:
             pf.value = prof
             pf.confidence = 0.9
-
-    return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
 
 
 def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> ExtractionResult:
@@ -888,10 +900,27 @@ def extract_document(
     use_llm: bool = True,
     locator: Locator | None = None,
     page_renderer: PageRenderer | None = None,
+    force_doc_type: str | None = None,
 ) -> ExtractionResult:
+    """서류 1건을 판독·추출한다.
+
+    force_doc_type: 검토자가 화면에서 문서유형을 교정한 경우 그 값을 사용한다.
+    실물 서류는 어휘가 섞여 있어 규칙 분류가 확신하지 못하고(실측 22건 전부 침묵),
+    유형 판단이 전적으로 LLM에 달려 있다. 유형 하나가 틀리면 위험등급·날짜·고객확인
+    게이팅이 전부 어긋나 판정이 조용히 약해지므로, 사람이 고칠 수 있어야 한다.
+    """
+    if force_doc_type in DOC_TYPES:
+        # 유형을 확정한 뒤 추출해야 필드 게이팅·스캔 우선순위가 그 유형 기준으로 걸린다.
+        parsed = ParsedDocument(
+            document_id=parsed.document_id, doc_type=force_doc_type,
+            fields=parsed.fields, raw_text=parsed.raw_text,
+        )
     result = (
         extract_with_llm(parsed, locator=locator) if use_llm else extract_rule_based(parsed, locator=locator)
     )
+    if force_doc_type in DOC_TYPES:
+        result.doc_type = force_doc_type
+        _apply_doc_type_gating(result, parsed)
     # 텍스트에 값이 없고 그림에만 있는 항목(체크표시 등급·표 안의 계약일·서명)을
     # 페이지당 한 번의 호출로 모아서 보완한다.
     if page_renderer is not None:

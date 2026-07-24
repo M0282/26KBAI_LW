@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -18,6 +20,7 @@ if str(ROOT) not in sys.path:
 # (스캔 이미지가 OCR 오독 그대로 판정되는 원인이었음) — 실제 환경변수가 우선.
 load_dotenv(ROOT / ".env", override=False)
 
+from src.common.llm_cache import clear_llm_cache
 from src.common.schemas import CheckStatus, ParsedDocument
 from src.ingest.law_search import find_legal_basis
 from src.parser.financial_extractor import DOC_TYPES, extract_document, field_map
@@ -74,12 +77,31 @@ div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radi
 
 with st.sidebar:
     st.header("검증 설정")
-    use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=bool(os.environ.get("ANTHROPIC_API_KEY")))
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=has_key)
     live_law = st.toggle("국가법령정보 API 최신 원문 보강", value=bool(os.environ.get("LAW_API_OC")))
-    st.caption("키가 없거나 호출에 실패하면 규칙 기반 추출과 로컬 법령 검색으로 자동 전환됩니다.")
+    # 이전 문구는 "키가 없으면 규칙 기반으로 자동 전환됩니다"였는데, 실측 결과
+    # 규칙 폴백은 4개 문서를 전부 '상품설명서'로 분류해 쓸모 있는 판정이 0건이었다.
+    # 지키지 못하는 약속을 화면에 두지 않는다.
+    if not has_key:
+        st.error("ANTHROPIC_API_KEY가 없습니다. 문서 분류·필드 추출 정확도가 크게 떨어집니다.")
+    st.caption(
+        "LLM을 끄면 규칙 기반으로만 동작합니다. 규칙 분류는 실물 서류에서 유형을 "
+        "구분하지 못하는 경우가 많아 대부분의 항목이 '미확인'으로 남습니다."
+    )
     st.divider()
     st.markdown("**MVP 검증 규칙**")
     st.code("PKG-001\nFIT-001\nEXP-001\nDATE-001\nACK-001", language=None)
+    st.divider()
+    st.markdown("**개인정보 처리**")
+    st.caption(
+        "업로드 서류는 판독을 위해 Anthropic API로 전송되며 모델 학습에 사용되지 않습니다. "
+        "원본 파일은 디스크에 저장하지 않으나, 재호출 비용을 줄이기 위해 판독 결과를 "
+        "로컬 `.cache/llm`에 남깁니다. 실제 고객 서류를 다룬 뒤에는 비워주세요."
+    )
+    if st.button("판독 캐시 비우기", use_container_width=True):
+        removed = clear_llm_cache()
+        st.success(f"캐시 {removed}건을 삭제했습니다.")
 
 uploaded = st.file_uploader(
     "판매서류 패키지 업로드",
@@ -101,7 +123,7 @@ if not uploaded:
     st.stop()
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def process_document(raw_bytes: bytes, file_name: str, with_llm: bool):
+def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_type: str | None = None):
     """서류 1건 판독·추출. 파일 내용이 같으면 재실행하지 않는다.
 
     Streamlit은 위젯을 건드릴 때마다 스크립트를 처음부터 다시 돌린다. 캐시가 없으면
@@ -111,7 +133,8 @@ def process_document(raw_bytes: bytes, file_name: str, with_llm: bool):
     pdf = load_pdf(raw_bytes, document_id=file_name)
     parsed = to_parsed_document(pdf)
     result = extract_document(
-        parsed, use_llm=with_llm, locator=pdf.locate, page_renderer=pdf.render_page
+        parsed, use_llm=with_llm, locator=pdf.locate, page_renderer=pdf.render_page,
+        force_doc_type=forced_type,
     )
     return pdf, parsed.raw_text, result
 
@@ -177,7 +200,10 @@ for index, file in enumerate(uploaded, start=1):
     progress.progress((index - 1) / len(uploaded), text=f"[{index}/{len(uploaded)}] {name} 판독 중…")
     try:
         raw_bytes = file.getvalue()
-        pdf, raw_text, result = process_document(raw_bytes, name, use_llm)
+        # 검토자가 앞선 실행에서 문서유형을 교정했다면 그 값으로 다시 추출한다.
+        pdf, raw_text, result = process_document(
+            raw_bytes, name, use_llm, st.session_state.get(f"doctype::{name}")
+        )
         parsed_documents.append(ParsedDocument(
             document_id=name, doc_type=result.doc_type, fields=result.fields, raw_text=raw_text,
         ))
@@ -221,6 +247,18 @@ for index, document in enumerate(parsed_documents):
         )
         if meta.warning:
             st.caption(meta.warning)
+        # 유형 하나가 틀리면 위험등급·날짜·고객확인 게이팅이 전부 어긋나 판정이
+        # 조용히 약해진다. 실물 서류에서는 규칙 분류가 확신하지 못해(실측 22건 전부 침묵)
+        # 유형 판단이 전적으로 LLM에 달려 있으므로, 검토자가 고칠 수 있어야 한다.
+        options = list(DOC_TYPES)
+        st.selectbox(
+            "문서유형 (틀렸으면 교정)",
+            options=options,
+            index=options.index(document.doc_type) if document.doc_type in options else 0,
+            format_func=lambda t: DOC_TYPES[t][0],
+            key=f"doctype::{document.document_id}",
+            help="교정하면 그 유형 기준으로 다시 추출·판정합니다.",
+        )
         # 값이 있는 필드만 보여주면 같은 양식인데 목록이 달라 보인다.
         # 유형별 고정 필드를 전부 표시하고 못 찾은 것은 '미확인'으로 드러낸다.
         # 근거(신뢰도)도 함께 보여준다 — 규칙이 확정한 값과 AI가 그림에서 읽은 값이
@@ -283,6 +321,11 @@ for check in checks:
         legal_results = legal_basis(
             issue.search_query, hint.preferred_articles, hint.preferred_sources, live_law
         )
+        # 근거 조문을 판정 객체에 실어둔다. 화면에서만 존재하면 결과를 내보내는 순간
+        # 근거가 사라진다(스키마가 evidence_clause를 약속해두고 아무도 채우지 않았다).
+        if legal_results:
+            check.evidence_clause = legal_results[0].citation
+            check.evidence_text = legal_results[0].text[:700]
         if legal_results:
             st.markdown("**관련 법령 원문 후보** (검색 상위 3건, 첫 번째가 최우선 근거)")
             for rank, result in enumerate(legal_results, start=1):
@@ -374,5 +417,63 @@ if selected_value:
             f"'{selected_value}'이(가) 이 문서 원문에서 발견되지 않았습니다. "
             "추출 오류(문서에 없는 값) 또는 OCR 오독일 수 있으니 원본을 확인하세요."
         )
+
+st.subheader("6. 검증 결과 내보내기")
+st.caption(
+    "컴플라이언스 기록물은 '언제·어떤 기준으로 판정했는가'가 핵심입니다. "
+    "판정·근거 조문과 함께 검증 시각·사용 모델·적용 정책을 담아 내려받습니다."
+)
+report = {
+    "verified_at": datetime.now().isoformat(timespec="seconds"),
+    "tool": "KB 금융상품 판매서류 검증 AI Copilot (MVP)",
+    "scope": "금융소비자보호법 제17조(적합성원칙)·제19조(설명의무) 관련 5개 항목",
+    "settings": {
+        "llm_used": use_llm,
+        "extraction_model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+        "vision_model": os.environ.get("VISION_MODEL", "claude-haiku-4-5"),
+        "live_law_lookup": live_law,
+        "profile_min_grade": dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE),
+    },
+    "documents": [
+        {
+            "document_id": document.document_id,
+            "doc_type": document.doc_type,
+            "fields": [
+                {
+                    "name": field.name,
+                    "value": field.value,
+                    "page": field.page,
+                    "source": FIELD_SOURCE_LABEL(field),
+                }
+                for field in document.fields
+            ],
+        }
+        for document in parsed_documents
+    ],
+    "checks": [
+        {
+            "rule_id": check.rule_id,
+            "description": check.description,
+            "status": check.status.value,
+            "document_excerpt": check.document_excerpt,
+            "evidence_clause": check.evidence_clause,
+            "suggestion": check.suggestion,
+        }
+        for check in checks
+    ],
+    "metrics": {
+        "document_count": metrics.document_count,
+        "blocker_count": metrics.blocker_count,
+        "warning_count": metrics.warning_count,
+        "elapsed_seconds": metrics.elapsed_seconds,
+    },
+    "unread_documents": errors,
+}
+st.download_button(
+    "검증 결과 JSON 내려받기",
+    data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+    file_name=f"검증결과_{datetime.now():%Y%m%d_%H%M%S}.json",
+    mime="application/json",
+)
 
 st.caption("주의: 이 MVP는 법률 위반을 확정하지 않으며, 규정 준수 여부의 추가 검토가 필요한 지점을 선별합니다.")

@@ -33,6 +33,24 @@ def make_key(*parts: str) -> str:
     return h.hexdigest()
 
 
+def clear_llm_cache() -> int:
+    """저장된 판독 결과를 모두 지우고 삭제 건수를 반환한다.
+
+    비전 판독 응답에는 문서 전사 텍스트가 들어갈 수 있어(고객 성명·주소 포함)
+    실제 고객 서류를 처리한 뒤에는 비울 수 있어야 한다.
+    """
+    if not CACHE_DIR.exists():
+        return 0
+    removed = 0
+    for path in CACHE_DIR.glob("*.json"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def cached_text(key: str, produce: Callable[[], str]) -> str:
     """key에 해당하는 LLM 텍스트 응답이 있으면 재사용, 없으면 produce()로 생성·저장.
 
