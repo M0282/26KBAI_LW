@@ -693,8 +693,66 @@ def _fill_risk_grade_from_vision(
             return
 
 
+_VISION_CONTRACT_DATE_PROMPT = (
+    "이 서류에 기재된 계약 체결일(신청일)을 YYYY-MM-DD 형식으로만 출력하세요. "
+    "기재되어 있지 않으면 '없음'. 다른 말은 하지 마세요."
+)
+
+
+def ground_scanned_date(answer: str | None, text: str) -> str | None:
+    """비전이 읽은 날짜를 원문 숫자와 대조해 채택 여부를 정한다.
+
+    비전이 지어낸 날짜를 그대로 쓰지 않도록, 연·월·일 숫자가 모두 원문에
+    존재할 때만 채택한다(위험등급·상품명에 적용한 원문 대조와 같은 원칙).
+    """
+    m = re.search(r"(20\d{2})[-./](\d{1,2})[-./](\d{1,2})", answer or "")
+    if not m:
+        return None
+    year, month, day = m.group(1), int(m.group(2)), int(m.group(3))
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    compact = re.sub(r"\s+", "", text)
+    for part in (year, f"{month:02d}", f"{day:02d}"):
+        if part not in compact:
+            return None  # 원문에 없는 숫자 → 환각으로 보고 폐기
+    return f"{year}-{month:02d}-{day:02d}"
+
+
+def vision_scan_contract_date(image_bytes: bytes, text: str) -> str | None:
+    """페이지 이미지에서 계약일을 읽고, 그 숫자가 원문에도 있는지 대조한다.
+
+    실측: 계약서의 날짜는 표 양식이라 텍스트 추출이 '년 월 일 24 07 2026'처럼
+    라벨과 값을 분리·역순으로 내놓는다. 어떤 날짜 정규식으로도 파싱되지 않아
+    DATE-001이 한 번도 판정된 적이 없었다.
+    """
+    answer = _vision_ask(image_bytes, _VISION_CONTRACT_DATE_PROMPT, "vision-cdate", max_tokens=24)
+    return ground_scanned_date(answer, text)
+
+
+_DATE_DOC_TYPES = ("application", "acknowledgement")
 _ACK_DOC_TYPES = ("application", "acknowledgement", "suitability_form")
 _VISION_SIGN_MAX_PAGES = 4  # 서명란은 보통 앞·뒤 몇 쪽 안에 있다. 비용 상한.
+
+
+def _fill_contract_date_from_vision(
+    result: ExtractionResult, parsed: ParsedDocument, renderer: PageRenderer
+) -> None:
+    """계약서·확인서에서 계약일을 못 얻었으면 페이지 그림에서 읽는다."""
+    if result.doc_type not in _DATE_DOC_TYPES:
+        return
+    field = next((f for f in result.fields if f.name == "contract_date"), None)
+    if field is None or field.value:
+        return
+    for page_number in range(1, _VISION_SIGN_MAX_PAGES + 1):
+        image = renderer(page_number)
+        if not image:
+            break
+        value = vision_scan_contract_date(image, parsed.raw_text)
+        if value:
+            field.value = value
+            field.confidence = 0.85
+            field.page = page_number
+            return
 
 
 def _verify_acknowledgement_with_vision(
@@ -744,6 +802,7 @@ def extract_document(
     # 텍스트에 값이 없고 그림에만 있는 위험등급(체크표시 양식)을 마지막으로 보완한다.
     if page_renderer is not None:
         _fill_risk_grade_from_vision(result, parsed, page_renderer)
+        _fill_contract_date_from_vision(result, parsed, page_renderer)
         _verify_acknowledgement_with_vision(result, page_renderer)
     # 마지막에 유형별 고정 스키마로 맞춘다 — 같은 양식이면 같은 필드 목록이 나온다.
     apply_doc_type_schema(result)

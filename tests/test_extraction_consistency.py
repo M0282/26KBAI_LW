@@ -142,3 +142,31 @@ def test_missing_acknowledgement_is_missing_not_pass():
 
     docs = [ParsedDocument(document_id="c", doc_type="application", raw_text="x", fields=[])]
     assert check_acknowledgement(docs).status is CheckStatus.MISSING
+
+
+# --- 계약일 원문 대조 (DATE-001) ---
+# 실측: 계약서의 날짜는 표 양식이라 텍스트가 '년 월 일 24 07 2026'처럼
+# 라벨과 값이 분리·역순으로 추출된다. 어떤 날짜 정규식으로도 파싱되지 않아
+# DATE-001이 한 번도 판정되지 못했다. 비전으로 읽되 지어낸 값은 막는다.
+CONTRACT_TEXT = "저축자 성명 서명(인) 생년월일 : 저축자 주소 : 년 월 일 24 07 2026 대리인 성명"
+
+
+def test_scanned_date_accepted_when_digits_present_in_text():
+    from src.parser.financial_extractor import ground_scanned_date
+
+    assert ground_scanned_date("2026-07-24", CONTRACT_TEXT) == "2026-07-24"
+
+
+def test_scanned_date_rejected_when_absent_from_text():
+    from src.parser.financial_extractor import ground_scanned_date
+
+    # 원문에 없는 연도 → 환각으로 보고 폐기
+    assert ground_scanned_date("2019-07-24", CONTRACT_TEXT) is None
+
+
+def test_scanned_date_rejects_non_date_answers():
+    from src.parser.financial_extractor import ground_scanned_date
+
+    assert ground_scanned_date("없음", CONTRACT_TEXT) is None
+    assert ground_scanned_date(None, CONTRACT_TEXT) is None
+    assert ground_scanned_date("2026-13-45", CONTRACT_TEXT) is None
