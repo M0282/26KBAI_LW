@@ -148,7 +148,9 @@ for index, document in enumerate(parsed_documents):
         )
         if meta.warning:
             st.caption(meta.warning)
-        values = {name: value for name, value in field_map(document).items() if value}
+        # 값이 있는 필드만 보여주면 같은 양식인데 목록이 달라 보인다.
+        # 유형별 고정 필드를 전부 표시하고 못 찾은 것은 '미확인'으로 드러낸다.
+        values = {name: (value or "미확인") for name, value in field_map(document).items()}
         # 조건식으로 쓰면 그 결과(DeltaGenerator)가 Streamlit magic으로 화면에 덤프된다.
         if values:
             st.json(values, expanded=False)
