@@ -247,33 +247,65 @@ st.subheader("5. 서류 원문 하이라이트")
 selected_doc = st.selectbox("문서 선택", options=[document.document_id for document in parsed_documents])
 selected = next(document for document in parsed_documents if document.document_id == selected_doc)
 selected_pdf = pdf_details[selected_doc]
-field_values = [value for value in field_map(selected).values() if value and value != "확인"]
-selected_value = st.selectbox("찾을 추출값", options=field_values) if field_values else None
-if selected_value:
+# 값과 함께 '그 값을 어느 쪽에서 얻었는지'도 들고 간다.
+# 비전으로 판독한 값(계약일·서명 등)은 원문 텍스트에 없어 좌표 검색이 안 되지만,
+# 추출 단계에서 페이지는 기록해 두었다. 그 페이지를 보여주면 근거 확인이 가능하다.
+selectable = [f for f in selected.fields if f.value and f.value != "확인"]
+if not selectable:
+    st.caption("이 문서에서 추출된 값이 없어 표시할 근거가 없습니다.")
+else:
+    labels = [f"{field.name} · {field.value}" for field in selectable]
+    chosen_label = st.selectbox("찾을 추출값", options=labels, key=f"hl_value::{selected_doc}")
+    field = selectable[labels.index(chosen_label)]
+    selected_value = field.value
+
     hits = selected_pdf.locate(selected_value)
+    total_pages = len(selected_pdf.pages)
+
     if hits:
-        # 여러 페이지에 등장하면 전부 알려주고 골라 볼 수 있게 한다(첫 페이지만 보이던 문제).
         hit_pages = [hit["page"] for hit in hits]
-        if len(hits) > 1:
+        if len(hit_pages) == 1:
+            # 1쪽만 나오는 것이 정상인 경우가 많다. 화면이 고장난 것처럼 보이지 않도록 밝힌다.
             st.caption(
-                f"'{selected_value}'이(가) {len(hits)}개 페이지에 등장합니다 → "
+                f"'{selected_value}'은(는) 전체 {total_pages}쪽 중 **{hit_pages[0]}쪽에만** 있습니다."
+            )
+            chosen_page = hit_pages[0]
+        else:
+            st.caption(
+                f"'{selected_value}'은(는) 전체 {total_pages}쪽 중 {len(hit_pages)}개 쪽에 있습니다 → "
                 + ", ".join(f"{page}쪽" for page in hit_pages)
             )
-            chosen_page = st.selectbox("하이라이트할 페이지", options=hit_pages, key="highlight_page")
-        else:
-            chosen_page = hit_pages[0]
+            # 문서·값마다 키를 분리해야 다른 문서를 골랐을 때 이전 선택이 남지 않는다.
+            chosen_page = st.radio(
+                "하이라이트할 페이지", options=hit_pages, horizontal=True,
+                format_func=lambda page: f"{page}쪽",
+                key=f"hl_page::{selected_doc}::{selected_value}",
+            )
         hit = next(h for h in hits if h["page"] == chosen_page)
-        image = render_highlighted_page(
-            pdf_bytes_map[selected_doc],
-            page_number=hit["page"],
-            rects=hit["rects"],
+        st.image(
+            render_highlighted_page(
+                pdf_bytes_map[selected_doc], page_number=hit["page"], rects=hit["rects"]
+            ),
+            caption=f"{selected_doc} · {hit['page']}쪽 · '{selected_value}' 근거 위치",
+            use_container_width=True,
         )
-        st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
         with st.expander("좌표 데이터"):
             st.json(hits, expanded=False)
+    elif field.page:
+        # 그림에서 판독한 값 — 좌표는 없지만 어느 쪽에서 읽었는지는 안다.
+        st.info(
+            f"'{selected_value}'은(는) 텍스트가 아니라 **{field.page}쪽 이미지에서 판독**한 값입니다"
+            "(체크 표시·서명·표 안의 날짜 등). 좌표 상자는 없지만 해당 쪽을 그대로 보여드립니다."
+        )
+        st.image(
+            render_highlighted_page(
+                pdf_bytes_map[selected_doc], page_number=field.page, rects=[]
+            ),
+            caption=f"{selected_doc} · {field.page}쪽 · '{selected_value}' 판독 근거",
+            use_container_width=True,
+        )
     else:
-        # 좌표 미발견은 대개 '추출값이 원문에 없다'는 뜻이다(환각·OCR 오독).
-        # 원인을 감추지 않고 드러내야 검증 도구로서 신뢰할 수 있다.
+        # 좌표도 없고 판독 페이지도 없으면 정말로 근거가 없는 값이다.
         st.warning(
             f"'{selected_value}'이(가) 이 문서 원문에서 발견되지 않았습니다. "
             "추출 오류(문서에 없는 값) 또는 OCR 오독일 수 있으니 원본을 확인하세요."
