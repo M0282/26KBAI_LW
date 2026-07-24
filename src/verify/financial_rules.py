@@ -91,6 +91,16 @@ def _identity_key(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]", "", value)
 
 
+# 펀드 클래스 표기: "…증권 투자신탁(채권혼합) C-E", "… (주식) A", "… 종류C" 등.
+# 같은 펀드의 클래스 차이(수수료 구조)일 뿐 다른 상품이 아니다.
+_CLASS_SUFFIX = re.compile(r"\)\s*(?:종류형?\s*)?[A-Za-z][A-Za-z0-9\-]{0,5}\s*$")
+
+
+def _base_identity_key(value: str) -> str:
+    """클래스 접미사를 떼어낸 펀드 기본명 키."""
+    return _identity_key(_CLASS_SUFFIX.sub(")", value.strip()))
+
+
 def check_product_identity(documents: list[ParsedDocument]) -> RuleCheck:
     codes = _documents_with(documents, "product_code")
     names = _documents_with(documents, "product_name")
@@ -112,6 +122,16 @@ def check_product_identity(documents: list[ParsedDocument]) -> RuleCheck:
             description="문서 간 상품명·상품코드 일치 여부",
             status=CheckStatus.PASS,
             document_excerpt=f"공통 상품 식별값: {values[0]}",
+        )
+    # 클래스 접미사만 다르면 같은 펀드다 → 다른 상품 혼입(위험)이 아니라 표기 확인(주의).
+    if len({_base_identity_key(value) for value in values}) == 1:
+        return RuleCheck(
+            rule_id="PKG-001",
+            description="문서 간 상품명·상품코드 일치 여부",
+            status=CheckStatus.WARNING,
+            document_excerpt=" / ".join(values),
+            suggestion="같은 펀드의 클래스(수수료 유형) 표기 차이로 보입니다. "
+            "판매 클래스가 서류 간 일치하는지 확인하세요.",
         )
     return RuleCheck(
         rule_id="PKG-001",
