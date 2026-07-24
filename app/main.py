@@ -222,6 +222,11 @@ if selected_value:
         with st.expander("좌표 데이터"):
             st.json(hits, expanded=False)
     else:
-        st.warning("추출값의 정확한 좌표를 찾지 못했습니다. OCR 또는 근거 문구 정합성 보강이 필요합니다.")
+        # 좌표 미발견은 대개 '추출값이 원문에 없다'는 뜻이다(환각·OCR 오독).
+        # 원인을 감추지 않고 드러내야 검증 도구로서 신뢰할 수 있다.
+        st.warning(
+            f"'{selected_value}'이(가) 이 문서 원문에서 발견되지 않았습니다. "
+            "추출 오류(문서에 없는 값) 또는 OCR 오독일 수 있으니 원본을 확인하세요."
+        )
 
 st.caption("주의: 이 MVP는 법률 위반을 확정하지 않으며, 규정 준수 여부의 추가 검토가 필요한 지점을 선별합니다.")
