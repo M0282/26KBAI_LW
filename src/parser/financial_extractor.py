@@ -23,6 +23,34 @@ DOC_TYPES = {
     "acknowledgement": ("설명 확인서", ["설명 확인", "고객 확인", "설명일", "서명"]),
 }
 
+# 문서유형별로 '나올 수 있는' 필드를 고정한다.
+#
+# 왜: 같은 양식의 서류 2건이 서로 다른 필드 목록을 내놓으면 도구를 신뢰할 수 없다.
+# 실측 — 문장 133개가 동일한 핵심요약설명서 2건에서 한 건만 customer_acknowledgement가
+# 나왔다. 그 문서의 '확인'은 전부 안내 문구("□ 설명의무 이행확인", "서명을 하거나…")이고
+# 실제 고객 확인 기록이 아니었다. 즉 값의 유무가 문서가 아니라 LLM 변덕으로 갈렸다.
+#
+# 유형에 없는 필드는 아예 담지 않고, 있는 필드는 값이 없어도 자리를 남긴다(미확인).
+# 상품설명서에 고객확인·계약일이 없는 것은 문서의 성격이지 추출 실패가 아니다.
+DOC_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
+    "suitability_form": (
+        "customer_profile", "explanation_date", "customer_acknowledgement",
+        "staff_name", "principal_loss_explained", "risk_level_explained",
+    ),
+    "product_description": (
+        "product_name", "product_code", "product_risk_level",
+        "principal_loss_explained", "risk_level_explained", "fees_explained",
+    ),
+    "application": (
+        "product_name", "product_code", "contract_date", "customer_acknowledgement",
+        "staff_name", "principal_loss_explained", "fees_explained",
+    ),
+    "acknowledgement": (
+        "product_name", "explanation_date", "contract_date", "customer_acknowledgement",
+        "staff_name", "principal_loss_explained", "risk_level_explained", "fees_explained",
+    ),
+}
+
 FIELD_PATTERNS: dict[str, list[str]] = {
     "customer_profile": [
         r"(?:투자성향|투자자\s*유형|고객\s*성향)\s*[:：]?\s*([^\n]{1,30})",
@@ -537,6 +565,22 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
     return result
 
 
+def apply_doc_type_schema(result: ExtractionResult) -> None:
+    """추출 결과를 문서유형의 고정 필드 목록으로 맞춘다.
+
+    같은 유형이면 값이 무엇이든 **항상 같은 필드 목록**이 나오게 하는 것이 목적이다.
+    유형 밖 필드는 버리고(오탐 차단), 유형 안 필드는 없으면 빈 값으로 자리를 만든다.
+    """
+    expected = DOC_TYPE_FIELDS.get(result.doc_type)
+    if not expected:
+        return
+    by_name = {field.name: field for field in result.fields}
+    result.fields = [
+        by_name.get(name) or ParsedField(name=name, value=None, page=None, confidence=0.0)
+        for name in expected
+    ]
+
+
 PageRenderer = Callable[[int], "bytes | None"]
 _VISION_GRADE_MAX_PAGES = 2  # 위험등급은 앞쪽에 있다. 비용 상한을 둔다.
 
@@ -574,6 +618,8 @@ def extract_document(
     # 텍스트에 값이 없고 그림에만 있는 위험등급(체크표시 양식)을 마지막으로 보완한다.
     if page_renderer is not None:
         _fill_risk_grade_from_vision(result, parsed, page_renderer)
+    # 마지막에 유형별 고정 스키마로 맞춘다 — 같은 양식이면 같은 필드 목록이 나온다.
+    apply_doc_type_schema(result)
     return result
 
 
