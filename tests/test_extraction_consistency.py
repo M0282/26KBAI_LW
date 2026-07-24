@@ -170,3 +170,43 @@ def test_scanned_date_rejects_non_date_answers():
     assert ground_scanned_date("없음", CONTRACT_TEXT) is None
     assert ground_scanned_date(None, CONTRACT_TEXT) is None
     assert ground_scanned_date("2026-13-45", CONTRACT_TEXT) is None
+
+
+# --- 문서유형 분류: 규칙이 확신하면 LLM보다 우선 ---
+# 실측: 제목이 '상품설명 확인서'인 설명확인서를 LLM이 '상품설명서'로 오분류했다.
+# doc_type은 모든 필드 게이팅의 기준이라, 오분류 하나로 고객확인·담당자 필드가
+# 스키마에서 통째로 버려지고 ACK-001이 위험에서 누락으로 약해졌다.
+ACK_DOC_TEXT = (
+    "상품설명 확인서\n상품명: KB 글로벌 하이일드 증권투자신탁\n"
+    "설명일: 2026-07-15\n설명 담당자: 이판매\n고객 확인: 미서명\n"
+)
+
+
+def test_confident_rule_classification_detects_acknowledgement():
+    from src.parser.financial_extractor import confident_rule_doc_type
+
+    assert confident_rule_doc_type(ACK_DOC_TEXT) == "acknowledgement"
+
+
+def test_confident_classification_abstains_when_ambiguous():
+    """여러 유형 키워드가 섞이면 확신하지 않는다(LLM 판단을 뒤집지 않는다)."""
+    from src.parser.financial_extractor import confident_rule_doc_type
+
+    mixed = "상품설명서 위험등급 원금손실 수수료 · 투자성향 적합성 진단 · 고객 확인 서명"
+    assert confident_rule_doc_type(mixed) is None
+
+
+# --- 고객확인 값 표준화 ---
+# LLM이 '미서명'을 'False'로 내보내면 ACK-001의 부정어 목록에 걸리지 않아
+# 미서명 서류가 통과로 판정됐다.
+def test_acknowledgement_false_is_normalized_to_unsigned():
+    from src.parser.financial_extractor import UNSIGNED, normalize_field
+
+    for raw in ("False", "false", "미서명", "없음", "미확인"):
+        assert normalize_field("customer_acknowledgement", raw) == UNSIGNED
+
+
+def test_acknowledgement_positive_value_is_kept():
+    from src.parser.financial_extractor import SIGNED, UNSIGNED, normalize_field
+
+    assert normalize_field("customer_acknowledgement", SIGNED) != UNSIGNED
