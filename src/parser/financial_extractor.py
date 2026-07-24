@@ -144,6 +144,72 @@ def scan_risk_grade(text: str) -> str | None:
     return f"{m.group(1)}등급" if m else None
 
 
+def has_grade_legend(text: str) -> bool:
+    """1~6등급을 모두 나열한 범례표가 있는 문서인지.
+
+    범례가 있으면 원문에 모든 등급 숫자가 존재하므로 '원문에 있는가' 검증이
+    무력해진다(어떤 값이든 통과). 이런 문서는 LLM 숫자를 믿지 않고
+    확정문구 스캔이나 비전 판독으로만 등급을 정한다.
+    """
+    return len(set(re.findall(r"([1-6])\s*등급", text))) >= 5
+
+
+_VISION_GRADE_PROMPT = (
+    "이 금융상품 서류에서 '이 상품에 부여된 위험등급'이 몇 등급인지만 판단하세요. "
+    "표에 체크(✓)·색칠·동그라미로 표시된 등급이 있으면 그 등급입니다. "
+    "설명 문구에 'N등급으로 분류'라고 적혀 있으면 그 등급입니다. "
+    "표시가 전혀 없으면 '없음'이라고 답하세요. "
+    "1~6 숫자 하나 또는 '없음'만 출력하고 다른 말은 하지 마세요."
+)
+
+
+def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
+    """페이지 이미지에서 부여된 위험등급을 읽는다(텍스트에 값이 없을 때만 호출).
+
+    실측: 은행 핵심요약설명서는 위험등급을 범례표 체크(✓)로만 표시해
+    텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
+    결과 캐시로 같은 페이지 재호출은 0원. VISION_OCR=0이면 비활성.
+    """
+    if os.environ.get("VISION_OCR", "1") == "0" or not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        import base64
+        import hashlib
+
+        import anthropic
+
+        from src.common.llm_cache import cached_text, make_key
+    except Exception:
+        return None
+    model = os.environ.get("VISION_MODEL", "claude-haiku-4-5")
+    key = make_key("vision-grade", model, hashlib.sha256(image_bytes).hexdigest())
+
+    def _produce() -> str:
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=model,
+            max_tokens=16,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/jpeg",
+                        "data": base64.standard_b64encode(image_bytes).decode(),
+                    }},
+                    {"type": "text", "text": _VISION_GRADE_PROMPT},
+                ],
+            }],
+        )
+        return "".join(b.text for b in message.content if b.type == "text")
+
+    try:
+        answer = cached_text(key, _produce)
+    except Exception:
+        return None
+    m = re.search(r"[1-6]", answer or "")
+    return f"{m.group(0)}등급" if m else None
+
+
 def grade_supported_by_text(grade: str | None, text: str) -> bool:
     """추출된 위험등급이 원문에 실제로 존재하는지 확인(환각 차단).
 
@@ -255,11 +321,17 @@ def extract_rule_based(parsed: ParsedDocument, locator: Locator | None = None) -
             if grade:
                 risk_field.value = grade
                 risk_field.confidence = 0.9
-            elif not grade_supported_by_text(risk_field.value, text):
+            elif has_grade_legend(text) or not grade_supported_by_text(risk_field.value, text):
                 risk_field.value = None
                 risk_field.confidence = 0.0
         else:
             risk_field.value = None
+    # 날짜: 상품설명서에는 계약일·설명일이 없다(발행일·기준일 오인 방지).
+    if doc_type == "product_description":
+        for field_item in fields:
+            if field_item.name in ("contract_date", "explanation_date"):
+                field_item.value = None
+                field_item.confidence = 0.0
     # 투자성향: 적합성 진단표에서 명시 문구 스캔.
     prof_field = next((f for f in fields if f.name == "customer_profile"), None)
     if prof_field is not None and doc_type == "suitability_form":
@@ -402,12 +474,23 @@ def _attempt_llm(
             if grade:
                 rf.value = grade
                 rf.confidence = 0.9
-            elif not grade_supported_by_text(rf.value, parsed.raw_text):
-                # 원문에 없는 등급 = 환각. 오판보다 '미확인'이 안전하다.
+            elif has_grade_legend(parsed.raw_text) or not grade_supported_by_text(
+                rf.value, parsed.raw_text
+            ):
+                # 원문에 없는 등급 = 환각. 범례표가 있으면 원문 존재 검증이 무력하므로
+                # 역시 신뢰하지 않는다. 오판보다 '미확인'이 안전하다(이후 비전이 채운다).
                 rf.value = None
                 rf.confidence = 0.0
         else:
             rf.value = None
+    # 날짜: 상품설명서(간이투자설명서 포함)에는 계약일·설명일이 없다.
+    # 발행일·기준일을 계약일로 오인하면 DATE-001이 실행마다 흔들린다(실측).
+    if doc_type == "product_description":
+        for name in ("contract_date", "explanation_date"):
+            df = by_name.get(name)
+            if df is not None:
+                df.value = None
+                df.confidence = 0.0
     # 투자성향: '적합성 진단표'에서 명시 문구를 권위로 삼는다.
     pf = by_name.get("customer_profile")
     if pf is not None and doc_type == "suitability_form":
@@ -454,8 +537,44 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
     return result
 
 
-def extract_document(parsed: ParsedDocument, use_llm: bool = True, locator: Locator | None = None) -> ExtractionResult:
-    return extract_with_llm(parsed, locator=locator) if use_llm else extract_rule_based(parsed, locator=locator)
+PageRenderer = Callable[[int], "bytes | None"]
+_VISION_GRADE_MAX_PAGES = 2  # 위험등급은 앞쪽에 있다. 비용 상한을 둔다.
+
+
+def _fill_risk_grade_from_vision(
+    result: ExtractionResult, parsed: ParsedDocument, renderer: PageRenderer
+) -> None:
+    """상품설명서인데 텍스트에서 위험등급을 못 얻었으면 페이지 그림에서 읽는다."""
+    if result.doc_type != "product_description":
+        return
+    field = next((f for f in result.fields if f.name == "product_risk_level"), None)
+    if field is None or field.value:
+        return
+    for page_number in range(1, _VISION_GRADE_MAX_PAGES + 1):
+        image = renderer(page_number)
+        if not image:
+            break
+        grade = vision_scan_risk_grade(image)
+        if grade:
+            field.value = grade
+            field.confidence = 0.85
+            field.page = page_number
+            return
+
+
+def extract_document(
+    parsed: ParsedDocument,
+    use_llm: bool = True,
+    locator: Locator | None = None,
+    page_renderer: PageRenderer | None = None,
+) -> ExtractionResult:
+    result = (
+        extract_with_llm(parsed, locator=locator) if use_llm else extract_rule_based(parsed, locator=locator)
+    )
+    # 텍스트에 값이 없고 그림에만 있는 위험등급(체크표시 양식)을 마지막으로 보완한다.
+    if page_renderer is not None:
+        _fill_risk_grade_from_vision(result, parsed, page_renderer)
+    return result
 
 
 def enrich_document(parsed: ParsedDocument, use_llm: bool = True, locator: Locator | None = None) -> ParsedDocument:

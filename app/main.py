@@ -103,7 +103,9 @@ for file in uploaded:
         raw_bytes = file.getvalue()
         pdf = load_pdf(raw_bytes, document_id=file.name)
         parsed = to_parsed_document(pdf)
-        result = extract_document(parsed, use_llm=use_llm, locator=pdf.locate)
+        result = extract_document(
+            parsed, use_llm=use_llm, locator=pdf.locate, page_renderer=pdf.render_page
+        )
         enriched = ParsedDocument(
             document_id=parsed.document_id,
             doc_type=result.doc_type,

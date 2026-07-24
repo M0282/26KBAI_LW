@@ -48,6 +48,29 @@ class PdfDocument:
     scanned: bool = False        # 텍스트 레이어 없는 스캔본(이미지) 여부
     ocr_applied: bool = False     # OCR로 텍스트를 복원했는지
     vision_applied: bool = False  # Tesseract가 못 읽어 LLM 비전으로 전사했는지
+    pdf_bytes: bytes | None = None  # 페이지 재렌더링용 원본(체크박스 등 그림 판독)
+
+    def render_page(self, page_number: int, dpi: int = 150) -> bytes | None:
+        """페이지를 JPEG로 렌더링한다.
+
+        텍스트 PDF에도 값이 '그림'으로만 있는 경우가 있다(실측: 핵심요약설명서의
+        위험등급이 범례표 체크(✓)로만 표시 — 텍스트 레이어엔 공란).
+        그런 필드를 비전으로 읽기 위한 통로다.
+        """
+        if not self.pdf_bytes:
+            return None
+        try:
+            doc = fitz.open(stream=self.pdf_bytes, filetype="pdf")
+        except Exception:
+            return None
+        try:
+            if not 1 <= page_number <= doc.page_count:
+                return None
+            return doc[page_number - 1].get_pixmap(dpi=dpi).tobytes("jpeg")
+        except Exception:
+            return None
+        finally:
+            doc.close()
 
     @property
     def text(self) -> str:
@@ -245,6 +268,10 @@ def load_pdf(
     ocr_applied = False
     vision_applied = False
     try:
+        pdf_bytes = doc.tobytes()  # 페이지 재렌더링용(닫은 뒤에도 쓰기 위해 보관)
+    except Exception:
+        pdf_bytes = None
+    try:
         for i, page in enumerate(doc, start=1):
             text = page.get_text("text")
             words = [
@@ -279,6 +306,7 @@ def load_pdf(
         scanned=scanned,
         ocr_applied=ocr_applied,
         vision_applied=vision_applied,
+        pdf_bytes=pdf_bytes,
     )
 
 
