@@ -63,3 +63,46 @@ def test_schema_keeps_missing_fields_as_none():
     apply_doc_type_schema(result)
     assert all(f.value is None for f in result.fields)
     assert len(result.fields) == len(DOC_TYPE_FIELDS["product_description"])
+
+
+# --- 상품명 원문 대조 (PKG-001의 비교 기준값을 지키기 위한 회귀) ---
+# 실측: 원문 '신한금융투자 제 23129호 파생결합증권(ELS)'을 LLM이
+# '신한금융투자 23129호 파생결합증권(주가연계증권)(ELS)'로 바꿔 냈다.
+# 문서에 없는 이름은 하이라이트가 불가능하고, 같은 상품을 다른 상품으로
+# 판정하게 만든다.
+ELS_TEXT = (
+    "확인·숙지하여 주시기 바랍니다 - 신한금융투자 제 23129호 파생결합증권(ELS) "
+    "(원금비보장형) 투자 위험등급 : 2등급(고위험)"
+)
+
+
+def test_product_name_kept_when_present_in_text():
+    from src.parser.financial_extractor import ground_product_name
+
+    name = "신한금융투자 제 23129호 파생결합증권(ELS)"
+    assert ground_product_name(name, ELS_TEXT) == name
+
+
+def test_product_name_ignores_whitespace_differences():
+    from src.parser.financial_extractor import ground_product_name
+
+    name = "신한금융투자제23129호파생결합증권(ELS)"
+    assert ground_product_name(name, ELS_TEXT) == name
+
+
+def test_hallucinated_product_name_is_repaired_to_verbatim_text():
+    from src.parser.financial_extractor import ground_product_name
+
+    repaired = ground_product_name(
+        "신한금융투자 23129호 파생결합증권(주가연계증권)(ELS)", ELS_TEXT
+    )
+    assert repaired is not None
+    # 복원값은 원문에 그대로 존재해야 한다(공백 무시 비교).
+    assert repaired.replace(" ", "") in ELS_TEXT.replace(" ", "")
+    assert "주가연계증권" not in repaired
+
+
+def test_unrelated_product_name_is_discarded():
+    from src.parser.financial_extractor import ground_product_name
+
+    assert ground_product_name("삼성전자 우선주 ETF 상장지수펀드", ELS_TEXT) is None

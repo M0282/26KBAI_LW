@@ -172,6 +172,55 @@ def scan_risk_grade(text: str) -> str | None:
     return f"{m.group(1)}등급" if m else None
 
 
+def _compact_with_map(text: str) -> tuple[str, list[int]]:
+    """공백을 제거한 문자열과, 각 문자의 원문 인덱스 대응표."""
+    chars: list[str] = []
+    index_map: list[int] = []
+    for i, ch in enumerate(text):
+        if not ch.isspace():
+            chars.append(ch)
+            index_map.append(i)
+    return "".join(chars), index_map
+
+
+def ground_product_name(name: str | None, text: str) -> str | None:
+    """상품명을 원문에 실제로 존재하는 표기로 교정한다.
+
+    실측: 원문이 '신한금융투자 제 23129호 파생결합증권(ELS) (원금비보장형)'인데
+    LLM이 '제'를 빼고 '(주가연계증권)'을 지어 넣었다. 이런 이름은 하이라이트가
+    불가능할 뿐 아니라, PKG-001(문서 간 상품 동일성)이 이 값으로 비교하므로
+    서류가 같은 상품인데도 다르다고 판정될 수 있다.
+
+    원문에 그대로 있으면 그대로 두고, 없으면 원문에서 가장 길게 겹치는 구간을
+    찾아 그 '원문 표기'로 바꾼다. 겹침이 너무 짧으면 지어낸 값으로 보고 버린다.
+    """
+    if not name:
+        return name
+    compact_text, index_map = _compact_with_map(text)
+    compact_name = re.sub(r"\s+", "", name)
+    if not compact_name or compact_name in compact_text:
+        return name
+
+    best_start = best_len = 0
+    for start in range(len(compact_name)):
+        # 이미 찾은 것보다 길어질 수 없으면 중단
+        if len(compact_name) - start <= best_len:
+            break
+        for end in range(len(compact_name), start + best_len, -1):
+            if compact_name[start:end] in compact_text:
+                best_start, best_len = start, end - start
+                break
+
+    # 기준은 '원문에서 얼마나 복원했는가'다. LLM이 덧붙인 군더더기까지 분모로 삼으면
+    # 멀쩡한 복원까지 버리게 된다(실측: 14자를 복원했는데 임계값 15에 걸려 폐기).
+    if best_len < max(10, len(compact_name) // 3):
+        return None
+    fragment = compact_name[best_start : best_start + best_len]
+    pos = compact_text.find(fragment)
+    recovered = text[index_map[pos] : index_map[pos + best_len - 1] + 1]
+    return recovered.strip(" ()[]{}·,:;-") or None
+
+
 def has_grade_legend(text: str) -> bool:
     """1~6등급을 모두 나열한 범례표가 있는 문서인지.
 
@@ -511,6 +560,13 @@ def _attempt_llm(
                 rf.confidence = 0.0
         else:
             rf.value = None
+    # 상품명: 원문에 있는 표기로 교정한다(하이라이트·상품 동일성 판정의 기준값).
+    nf = by_name.get("product_name")
+    if nf is not None and nf.value:
+        grounded = ground_product_name(nf.value, parsed.raw_text)
+        if grounded != nf.value:
+            nf.value = grounded
+            nf.confidence = 0.7 if grounded else 0.0
     # 날짜: 상품설명서(간이투자설명서 포함)에는 계약일·설명일이 없다.
     # 발행일·기준일을 계약일로 오인하면 DATE-001이 실행마다 흔들린다(실측).
     if doc_type == "product_description":
