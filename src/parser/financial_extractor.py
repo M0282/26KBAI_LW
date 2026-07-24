@@ -300,6 +300,15 @@ _VISION_SIGNATURE_PROMPT = (
 
 SIGNED = "확인(서명 기재)"
 UNSIGNED = "미서명"
+# 서류가 스스로 '확인받지 못했다'고 적어둔 표현. ACK-001의 부정 판정어와 같은 집합.
+_UNSIGNED_TOKENS = ("미확인", "없음", "미서명", "아니오")
+
+
+def _states_unsigned(value: str) -> bool:
+    compact = value.replace(" ", "")
+    if compact.lower() in ("false", "no"):  # LLM이 불리언으로 내는 경우
+        return True
+    return any(token in compact for token in _UNSIGNED_TOKENS)
 
 
 def vision_scan_signature(image_bytes: bytes) -> str | None:
@@ -368,6 +377,11 @@ def normalize_field(name: str, value: str | None) -> str | None:
         if compact.startswith(("및 ", "에 ", "의 ", "을 ", "를 ", "이 ", "가 ", "뿐만", "들이 ", "으로 ")):
             return None
         return compact
+    if name == "customer_acknowledgement":
+        # 서류가 '확인받지 못했다'고 적은 표현은 표기가 제각각이다(미서명 / False / 없음).
+        # ACK-001은 부정 표현을 보고 위험을 내므로, 여기서 표준 문구로 모아준다.
+        # (실측: LLM이 '미서명'을 'False'로 내보내 규칙이 부정으로 못 읽고 통과시켰다)
+        return UNSIGNED if _states_unsigned(value) else _compact(value)
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -376,14 +390,35 @@ def normalize_field(name: str, value: str | None) -> str | None:
     return _compact(value)
 
 
-def classify_document_rule_based(text: str) -> str:
-    scores: list[tuple[int, str]] = []
+def classify_scores(text: str) -> dict[str, int]:
+    """문서유형별 키워드 매칭 횟수."""
     compact = _compact_for_match(text)
-    for doc_type, (_, keywords) in DOC_TYPES.items():
-        score = sum(compact.count(_compact_for_match(keyword)) for keyword in keywords)
-        scores.append((score, doc_type))
-    best_score, best_type = max(scores, default=(0, "unknown"))
-    return best_type if best_score > 0 else "unknown"
+    return {
+        doc_type: sum(compact.count(_compact_for_match(keyword)) for keyword in keywords)
+        for doc_type, (_, keywords) in DOC_TYPES.items()
+    }
+
+
+def classify_document_rule_based(text: str) -> str:
+    scores = classify_scores(text)
+    best_type = max(scores, key=lambda k: scores[k], default="unknown")
+    return best_type if scores.get(best_type, 0) > 0 else "unknown"
+
+
+def confident_rule_doc_type(text: str) -> str | None:
+    """규칙 분류가 '이견 없이' 하나를 가리킬 때만 그 유형을 반환한다.
+
+    doc_type은 모든 필드 게이팅의 기준이라 판정 임계값이다. 실측 — 제목이
+    '상품설명 확인서'인 설명확인서를 LLM이 상품설명서로 오분류했고, 그 결과
+    고객확인·담당자 필드가 스키마에서 통째로 버려져 ACK-001이 위험에서
+    누락으로 약해졌다. 반면 규칙 분류는 키워드 4개로 정확히 맞혔다.
+    다른 유형 점수가 0이고 자기 점수가 2 이상일 때만 '확신'으로 본다.
+    """
+    scores = classify_scores(text)
+    best_type = max(scores, key=lambda k: scores[k], default="unknown")
+    best_score = scores.get(best_type, 0)
+    others = [s for t, s in scores.items() if t != best_type]
+    return best_type if best_score >= 2 and not any(others) else None
 
 
 def _page_from_locator(locator: Locator | None, evidence: str | None) -> int | None:
@@ -572,6 +607,24 @@ def _attempt_llm(
     doc_type = str(payload.get("doc_type", "unknown"))
     if doc_type not in DOC_TYPES and doc_type != "unknown":
         doc_type = "unknown"
+    # 규칙 분류가 확신할 때는 LLM보다 우선한다(등급·투자성향에 적용한 원칙과 동일).
+    confident = confident_rule_doc_type(parsed.raw_text)
+    if confident and confident != doc_type:
+        doc_type = confident
+
+    result = ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
+    _apply_doc_type_gating(result, parsed)
+    return result
+
+
+def _apply_doc_type_gating(result: ExtractionResult, parsed: ParsedDocument) -> None:
+    """문서유형에 따라 값의 채택·폐기를 결정한다.
+
+    유형이 바뀌면(사용자 교정 포함) 이 규칙을 다시 적용해야 한다.
+    유형별로 '그 서류에 있을 수 없는 값'을 비우는 것이 핵심이다.
+    """
+    doc_type = result.doc_type
+    by_name = {f.name: f for f in result.fields}
 
     # 위험등급: '상품설명서'에서만 명시 라벨을 권위로 삼는다(LLM 오추출 잦음).
     # 진단표 등은 위험도 범례를 상품등급으로 오인하지 않도록 위험등급을 비운다.
@@ -613,8 +666,6 @@ def _attempt_llm(
         if prof:
             pf.value = prof
             pf.confidence = 0.9
-
-    return ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
 
 
 def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> ExtractionResult:
@@ -734,60 +785,114 @@ _ACK_DOC_TYPES = ("application", "acknowledgement", "suitability_form")
 _VISION_SIGN_MAX_PAGES = 4  # 서명란은 보통 앞·뒤 몇 쪽 안에 있다. 비용 상한.
 
 
-def _fill_contract_date_from_vision(
+# 한 페이지에서 물어볼 수 있는 항목들. 질문마다 따로 호출하면 같은 이미지를
+# 여러 번 전송하게 된다(실측: 계약서 2쪽짜리에 비전 호출 4회 → 이미지 토큰 4배).
+# 비용의 대부분이 이미지 토큰(장당 ~1,600)이므로 한 번에 모아 묻는다.
+_VISION_ITEM_SPECS = {
+    "risk_grade": (
+        '"risk_grade": 이 상품에 부여된 위험등급 숫자(1~6). '
+        "표에 체크·색칠·동그라미로 표시된 등급이나 'N등급으로 분류' 문구를 근거로 하고, "
+        "없으면 null"
+    ),
+    "contract_date": (
+        '"contract_date": 계약 체결일(신청일)을 "YYYY-MM-DD" 문자열로. 없으면 null'
+    ),
+    "signature": (
+        '"signature": 고객(저축자·투자자)의 서명·기명날인 상태. '
+        '기재돼 있으면 "signed", 서명란은 있으나 비어 있으면 "blank", 서명란 자체가 없으면 null'
+    ),
+}
+
+
+def vision_read_page(image_bytes: bytes, items: tuple[str, ...]) -> dict:
+    """페이지 이미지 한 장에 필요한 항목을 한 번에 묻는다.
+
+    개인정보는 요청하지 않는다 — 성명·주소·계좌는 판정에 쓰이지 않으므로
+    애초에 응답에 담기지 않게 해 캐시에도 남지 않도록 한다.
+    """
+    if not items:
+        return {}
+    prompt = (
+        "이 금융 서류 페이지 이미지를 보고 아래 항목만 JSON 객체로 출력하세요.\n"
+        "개인정보(성명·주민등록번호·계좌번호·주소·연락처)는 절대 출력하지 마세요.\n"
+        "보이지 않거나 판단할 수 없으면 null. JSON 외 다른 말은 하지 마세요.\n\n"
+        + "\n".join(_VISION_ITEM_SPECS[i] for i in items if i in _VISION_ITEM_SPECS)
+    )
+    answer = _vision_ask(
+        image_bytes, prompt, "vision-page:" + ",".join(sorted(items)), max_tokens=200
+    )
+    if not answer:
+        return {}
+    try:
+        return _extract_json_object(answer)
+    except (ValueError, TypeError):
+        return {}
+
+
+def _fill_from_vision(
     result: ExtractionResult, parsed: ParsedDocument, renderer: PageRenderer
 ) -> None:
-    """계약서·확인서에서 계약일을 못 얻었으면 페이지 그림에서 읽는다."""
-    if result.doc_type not in _DATE_DOC_TYPES:
-        return
-    field = next((f for f in result.fields if f.name == "contract_date"), None)
-    if field is None or field.value:
-        return
-    for page_number in range(1, _VISION_SIGN_MAX_PAGES + 1):
-        image = renderer(page_number)
-        if not image:
-            break
-        value = vision_scan_contract_date(image, parsed.raw_text)
-        if value:
-            field.value = value
-            field.confidence = 0.85
-            field.page = page_number
-            return
+    """텍스트로 못 얻은 판정 필드를 페이지 그림에서 한 번에 읽어 채운다.
 
-
-def _verify_acknowledgement_with_vision(
-    result: ExtractionResult, renderer: PageRenderer
-) -> None:
-    """고객확인 값을 '서명이 실제로 있는가'로 대체한다.
-
-    텍스트에서 뽑은 True는 약관 문구를 읽은 결과일 수 있어 서명 유무를 구분하지
-    못한다. 한 쪽이라도 서명이 기재돼 있으면 확인, 서명란이 있는데 전부 비어
-    있으면 미서명(ACK-001이 위험으로 잡는다), 서명란이 없으면 미확인으로 둔다.
+    페이지당 호출 1회. 필요한 항목이 모두 채워지면 즉시 중단한다.
     """
-    if result.doc_type not in _ACK_DOC_TYPES:
+    by_name = {f.name: f for f in result.fields}
+    wanted: list[str] = []
+    if result.doc_type == "product_description" and not (
+        by_name.get("product_risk_level") and by_name["product_risk_level"].value
+    ):
+        wanted.append("risk_grade")
+    if result.doc_type in _DATE_DOC_TYPES and not (
+        by_name.get("contract_date") and by_name["contract_date"].value
+    ):
+        wanted.append("contract_date")
+    if result.doc_type in _ACK_DOC_TYPES and "customer_acknowledgement" in by_name:
+        wanted.append("signature")
+    if not wanted:
         return
-    field = next((f for f in result.fields if f.name == "customer_acknowledgement"), None)
-    if field is None:
-        return
-    verdict: str | None = None
+
+    signature_verdict: str | None = None
     for page_number in range(1, _VISION_SIGN_MAX_PAGES + 1):
+        if not wanted:
+            break
         image = renderer(page_number)
         if not image:
             break
-        answer = vision_scan_signature(image)
-        if answer == SIGNED:
-            verdict = SIGNED
-            field.page = page_number
-            break
-        if answer == UNSIGNED:
-            verdict = UNSIGNED  # 계속 보되, 뒤에서 서명을 찾으면 그쪽이 우선
-    if verdict is not None:
-        field.value = verdict
-        field.confidence = 0.85
-    elif field.value:
-        # 서명란을 찾지 못했는데 텍스트만 보고 True를 낸 값은 근거가 없다.
-        field.value = None
-        field.confidence = 0.0
+        payload = vision_read_page(image, tuple(wanted))
+
+        if "risk_grade" in wanted:
+            m = re.search(r"[1-6]", str(payload.get("risk_grade") or ""))
+            if m:
+                field = by_name["product_risk_level"]
+                field.value, field.confidence, field.page = f"{m.group(0)}등급", 0.85, page_number
+                wanted.remove("risk_grade")
+
+        if "contract_date" in wanted:
+            value = ground_scanned_date(str(payload.get("contract_date") or ""), parsed.raw_text)
+            if value:
+                field = by_name["contract_date"]
+                field.value, field.confidence, field.page = value, 0.85, page_number
+                wanted.remove("contract_date")
+
+        if "signature" in wanted:
+            answer = str(payload.get("signature") or "").strip().lower()
+            if answer == "signed":
+                signature_verdict = SIGNED
+                by_name["customer_acknowledgement"].page = page_number
+                wanted.remove("signature")
+            elif answer == "blank":
+                # 서명란은 있는데 비어 있음. 뒷장에서 서명을 찾으면 그쪽이 우선이므로 계속 본다.
+                signature_verdict = UNSIGNED
+
+    if "customer_acknowledgement" in by_name and result.doc_type in _ACK_DOC_TYPES:
+        field = by_name["customer_acknowledgement"]
+        if signature_verdict is not None:
+            field.value, field.confidence = signature_verdict, 0.85
+        elif field.value and not _states_unsigned(field.value):
+            # 서명란을 찾지 못했는데 텍스트만 보고 '확인'을 낸 값은 근거가 없다.
+            # 다만 '미서명'처럼 서류가 명시적으로 부정을 적어둔 경우는 그 자체가
+            # 증거이므로 지우지 않는다(지우면 위험이 누락으로 약해진다).
+            field.value, field.confidence = None, 0.0
 
 
 def extract_document(
@@ -795,15 +900,31 @@ def extract_document(
     use_llm: bool = True,
     locator: Locator | None = None,
     page_renderer: PageRenderer | None = None,
+    force_doc_type: str | None = None,
 ) -> ExtractionResult:
+    """서류 1건을 판독·추출한다.
+
+    force_doc_type: 검토자가 화면에서 문서유형을 교정한 경우 그 값을 사용한다.
+    실물 서류는 어휘가 섞여 있어 규칙 분류가 확신하지 못하고(실측 22건 전부 침묵),
+    유형 판단이 전적으로 LLM에 달려 있다. 유형 하나가 틀리면 위험등급·날짜·고객확인
+    게이팅이 전부 어긋나 판정이 조용히 약해지므로, 사람이 고칠 수 있어야 한다.
+    """
+    if force_doc_type in DOC_TYPES:
+        # 유형을 확정한 뒤 추출해야 필드 게이팅·스캔 우선순위가 그 유형 기준으로 걸린다.
+        parsed = ParsedDocument(
+            document_id=parsed.document_id, doc_type=force_doc_type,
+            fields=parsed.fields, raw_text=parsed.raw_text,
+        )
     result = (
         extract_with_llm(parsed, locator=locator) if use_llm else extract_rule_based(parsed, locator=locator)
     )
-    # 텍스트에 값이 없고 그림에만 있는 위험등급(체크표시 양식)을 마지막으로 보완한다.
+    if force_doc_type in DOC_TYPES:
+        result.doc_type = force_doc_type
+        _apply_doc_type_gating(result, parsed)
+    # 텍스트에 값이 없고 그림에만 있는 항목(체크표시 등급·표 안의 계약일·서명)을
+    # 페이지당 한 번의 호출로 모아서 보완한다.
     if page_renderer is not None:
-        _fill_risk_grade_from_vision(result, parsed, page_renderer)
-        _fill_contract_date_from_vision(result, parsed, page_renderer)
-        _verify_acknowledgement_with_vision(result, page_renderer)
+        _fill_from_vision(result, parsed, page_renderer)
     # 마지막에 유형별 고정 스키마로 맞춘다 — 같은 양식이면 같은 필드 목록이 나온다.
     apply_doc_type_schema(result)
     return result
