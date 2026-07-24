@@ -157,10 +157,19 @@ def check_suitability(
             suggestion="적합성 진단표와 상품설명서를 확인하세요.",
         )
 
-    profile_doc, profile = profiles[0]
-    risk_doc, risk = risks[0]
+    table = profile_min_grade or DEFAULT_PROFILE_MIN_ALLOWED_GRADE
+    # 패키지에 상품설명서가 여럿이면 등급이 서로 다를 수 있다. 첫 문서를 고르면
+    # 업로드 순서만으로 판정이 갈리므로, 판단은 늘 **가장 보수적인 값**으로 한다.
+    # - 상품: 가장 위험한 등급(숫자가 작은 쪽)
+    # - 고객: 위험 감내도가 가장 낮은 성향(허용 최소등급이 큰 쪽)
+    risk_doc, risk = min(
+        risks, key=lambda pair: (_risk_number(pair[1]) or 99, pair[0].document_id)
+    )
+    profile_doc, profile = max(
+        profiles, key=lambda pair: (table.get(pair[1], 0), pair[0].document_id)
+    )
     risk_no = _risk_number(risk)
-    threshold = (profile_min_grade or DEFAULT_PROFILE_MIN_ALLOWED_GRADE).get(profile)
+    threshold = table.get(profile)
     if risk_no is None or threshold is None:
         return RuleCheck(
             rule_id="FIT-001",
@@ -187,6 +196,56 @@ def check_suitability(
         description="고객 투자성향과 상품 위험등급 교차 검증",
         status=CheckStatus.PASS,
         document_excerpt=f"투자성향 {profile}, 상품 위험등급 {risk}",
+    )
+
+
+def _missing_explanations(document: ParsedDocument) -> list[str]:
+    """문서에서 빠진 중요사항 설명 항목명."""
+    values = field_map(document)
+    semantic = {
+        "원금손실": values.get("principal_loss_explained"),
+        "위험등급": values.get("risk_level_explained"),
+        "수수료·비용": values.get("fees_explained"),
+    }
+    return [name for name, value in semantic.items() if not value]
+
+
+def check_explanations(documents: list[ParsedDocument]) -> RuleCheck:
+    """패키지 안의 **모든** 상품설명서를 검사한다.
+
+    기존에는 product_documents[0], 즉 첫 문서만 봤다. 그래서 같은 서류 묶음이라도
+    업로드 순서에 따라 통과/누락이 갈렸고(실측), 두 번째 이후 상품설명서에 설명이
+    빠져 있어도 드러나지 않았다. 문서 ID로 정렬해 메시지까지 순서에 무관하게 만든다.
+    """
+    products = [d for d in documents if d.doc_type == "product_description"]
+    if not products:
+        return RuleCheck(
+            rule_id="EXP-001",
+            description="상품 중요사항 설명 존재 여부",
+            status=CheckStatus.MISSING,
+            document_excerpt="상품설명서로 분류된 문서가 없습니다.",
+            suggestion="상품설명서를 업로드하세요.",
+        )
+    gaps = [
+        (document.document_id, missing)
+        for document in sorted(products, key=lambda d: d.document_id)
+        if (missing := _missing_explanations(document))
+    ]
+    if gaps:
+        return RuleCheck(
+            rule_id="EXP-001",
+            description="상품 중요사항 설명 존재 여부",
+            status=CheckStatus.MISSING,
+            document_excerpt=" / ".join(
+                f"{document_id}: {', '.join(missing)} 미확인" for document_id, missing in gaps
+            ),
+            suggestion="상품 유형에 맞는 핵심 위험·비용 설명이 실제 문서에 있는지 보완하세요.",
+        )
+    return RuleCheck(
+        rule_id="EXP-001",
+        description="상품 중요사항 설명 존재 여부",
+        status=CheckStatus.PASS,
+        document_excerpt=f"상품설명서 {len(products)}건 모두 원금손실·위험등급·수수료 설명 확인",
     )
 
 
@@ -225,10 +284,20 @@ def check_dates(documents: list[ParsedDocument]) -> RuleCheck:
             document_excerpt="설명일 또는 계약일을 찾지 못했습니다.",
             suggestion="계약 전에 설명이 이뤄졌는지 날짜를 확인하세요.",
         )
-    _, explanation_value = explanation[0]
-    _, contract_value = contract[0]
-    explanation_date = parse_iso_date(explanation_value)
-    contract_date = parse_iso_date(contract_value)
+    # 날짜가 여러 건이면 첫 값을 고르지 않고 가장 보수적으로 본다.
+    # 늦은 설명일 vs 이른 계약일 → '계약 이후 설명'이 하나라도 있으면 드러난다.
+    def _latest(pairs):
+        dated = [(parse_iso_date(v), v) for _, v in pairs]
+        dated = [(d, v) for d, v in dated if d]
+        return max(dated, default=(None, pairs[0][1]))
+
+    def _earliest(pairs):
+        dated = [(parse_iso_date(v), v) for _, v in pairs]
+        dated = [(d, v) for d, v in dated if d]
+        return min(dated, default=(None, pairs[0][1]))
+
+    explanation_date, explanation_value = _latest(explanation)
+    contract_date, contract_value = _earliest(contract)
     if not explanation_date or not contract_date:
         return RuleCheck(
             rule_id="DATE-001",
@@ -264,8 +333,16 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
             document_excerpt="고객 확인값을 찾지 못했습니다.",
             suggestion="설명 확인서의 고객 확인·서명란을 확인하세요.",
         )
-    value = acknowledgements[0][1]
-    negative = any(token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오"))
+    # 확인값이 여러 건이면 첫 값이 아니라 **부정 증빙을 우선**한다.
+    # 한 서류라도 미서명이면 패키지 전체가 위험이다(순서로 결과가 갈리면 안 된다).
+    def _is_negative(value: str) -> bool:
+        return any(
+            token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
+        )
+
+    negatives = [v for _, v in acknowledgements if _is_negative(v)]
+    value = negatives[0] if negatives else acknowledgements[0][1]
+    negative = bool(negatives)
     if negative:
         return RuleCheck(
             rule_id="ACK-001",
@@ -297,15 +374,5 @@ def run_package_checks(
         check_acknowledgement(documents),
     ]
     product_documents = [document for document in documents if document.doc_type == "product_description"]
-    checks.append(
-        check_explanation(product_documents[0])
-        if product_documents
-        else RuleCheck(
-            rule_id="EXP-001",
-            description="상품 중요사항 설명 존재 여부",
-            status=CheckStatus.MISSING,
-            document_excerpt="상품설명서로 분류된 문서가 없습니다.",
-            suggestion="상품설명서를 업로드하세요.",
-        )
-    )
+    checks.append(check_explanations(documents))
     return checks

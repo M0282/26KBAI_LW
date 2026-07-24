@@ -172,6 +172,55 @@ def scan_risk_grade(text: str) -> str | None:
     return f"{m.group(1)}등급" if m else None
 
 
+def _compact_with_map(text: str) -> tuple[str, list[int]]:
+    """공백을 제거한 문자열과, 각 문자의 원문 인덱스 대응표."""
+    chars: list[str] = []
+    index_map: list[int] = []
+    for i, ch in enumerate(text):
+        if not ch.isspace():
+            chars.append(ch)
+            index_map.append(i)
+    return "".join(chars), index_map
+
+
+def ground_product_name(name: str | None, text: str) -> str | None:
+    """상품명을 원문에 실제로 존재하는 표기로 교정한다.
+
+    실측: 원문이 '신한금융투자 제 23129호 파생결합증권(ELS) (원금비보장형)'인데
+    LLM이 '제'를 빼고 '(주가연계증권)'을 지어 넣었다. 이런 이름은 하이라이트가
+    불가능할 뿐 아니라, PKG-001(문서 간 상품 동일성)이 이 값으로 비교하므로
+    서류가 같은 상품인데도 다르다고 판정될 수 있다.
+
+    원문에 그대로 있으면 그대로 두고, 없으면 원문에서 가장 길게 겹치는 구간을
+    찾아 그 '원문 표기'로 바꾼다. 겹침이 너무 짧으면 지어낸 값으로 보고 버린다.
+    """
+    if not name:
+        return name
+    compact_text, index_map = _compact_with_map(text)
+    compact_name = re.sub(r"\s+", "", name)
+    if not compact_name or compact_name in compact_text:
+        return name
+
+    best_start = best_len = 0
+    for start in range(len(compact_name)):
+        # 이미 찾은 것보다 길어질 수 없으면 중단
+        if len(compact_name) - start <= best_len:
+            break
+        for end in range(len(compact_name), start + best_len, -1):
+            if compact_name[start:end] in compact_text:
+                best_start, best_len = start, end - start
+                break
+
+    # 기준은 '원문에서 얼마나 복원했는가'다. LLM이 덧붙인 군더더기까지 분모로 삼으면
+    # 멀쩡한 복원까지 버리게 된다(실측: 14자를 복원했는데 임계값 15에 걸려 폐기).
+    if best_len < max(10, len(compact_name) // 3):
+        return None
+    fragment = compact_name[best_start : best_start + best_len]
+    pos = compact_text.find(fragment)
+    recovered = text[index_map[pos] : index_map[pos + best_len - 1] + 1]
+    return recovered.strip(" ()[]{}·,:;-") or None
+
+
 def has_grade_legend(text: str) -> bool:
     """1~6등급을 모두 나열한 범례표가 있는 문서인지.
 
@@ -191,13 +240,8 @@ _VISION_GRADE_PROMPT = (
 )
 
 
-def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
-    """페이지 이미지에서 부여된 위험등급을 읽는다(텍스트에 값이 없을 때만 호출).
-
-    실측: 은행 핵심요약설명서는 위험등급을 범례표 체크(✓)로만 표시해
-    텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
-    결과 캐시로 같은 페이지 재호출은 0원. VISION_OCR=0이면 비활성.
-    """
+def _vision_ask(image_bytes: bytes, prompt: str, tag: str, max_tokens: int = 16) -> str | None:
+    """페이지 이미지에 짧은 질문을 던진다. 결과 캐시로 같은 페이지 재호출은 0원."""
     if os.environ.get("VISION_OCR", "1") == "0" or not os.environ.get("ANTHROPIC_API_KEY"):
         return None
     try:
@@ -210,13 +254,13 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
     except Exception:
         return None
     model = os.environ.get("VISION_MODEL", "claude-haiku-4-5")
-    key = make_key("vision-grade", model, hashlib.sha256(image_bytes).hexdigest())
+    key = make_key(tag, model, hashlib.sha256(image_bytes).hexdigest())
 
     def _produce() -> str:
         client = anthropic.Anthropic()
         message = client.messages.create(
             model=model,
-            max_tokens=16,
+            max_tokens=max_tokens,
             messages=[{
                 "role": "user",
                 "content": [
@@ -224,18 +268,54 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
                         "type": "base64", "media_type": "image/jpeg",
                         "data": base64.standard_b64encode(image_bytes).decode(),
                     }},
-                    {"type": "text", "text": _VISION_GRADE_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }],
         )
         return "".join(b.text for b in message.content if b.type == "text")
 
     try:
-        answer = cached_text(key, _produce)
+        return cached_text(key, _produce)
     except Exception:
         return None
+
+
+def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
+    """페이지 이미지에서 부여된 위험등급을 읽는다(텍스트에 값이 없을 때만 호출).
+
+    실측: 은행 핵심요약설명서는 위험등급을 범례표 체크(✓)로만 표시해
+    텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
+    """
+    answer = _vision_ask(image_bytes, _VISION_GRADE_PROMPT, "vision-grade")
     m = re.search(r"[1-6]", answer or "")
     return f"{m.group(0)}등급" if m else None
+
+
+_VISION_SIGNATURE_PROMPT = (
+    "이 페이지에 고객(저축자·투자자)의 서명 또는 기명날인이 실제로 기재되어 있습니까? "
+    "개인정보는 절대 출력하지 마세요. 서명란이 있고 채워져 있으면 '기재됨', "
+    "서명란은 있으나 비어 있으면 '공란', 서명란 자체가 없으면 '서명란없음'. "
+    "이 셋 중 하나만 출력하세요."
+)
+
+SIGNED = "확인(서명 기재)"
+UNSIGNED = "미서명"
+
+
+def vision_scan_signature(image_bytes: bytes) -> str | None:
+    """페이지에 고객 서명이 실제로 기재됐는지 본다.
+
+    실측: 계약서의 '서명' 언급은 전부 약관 조문이고 서명란은 텍스트상 공란인데
+    LLM은 그 문구만 읽고 customer_acknowledgement=True를 냈다. 서명이 실제로는
+    2쪽에 그림으로 있었으므로 결과는 맞았지만 근거가 틀렸다 — 미서명 서류였어도
+    똑같이 True가 나왔을 것이고, 그건 ACK-001이 잡아야 할 위반이다.
+    """
+    answer = (_vision_ask(image_bytes, _VISION_SIGNATURE_PROMPT, "vision-sign") or "").strip()
+    if "기재" in answer:
+        return SIGNED
+    if "공란" in answer:
+        return UNSIGNED
+    return None  # 서명란없음 / 판독 실패
 
 
 def grade_supported_by_text(grade: str | None, text: str) -> bool:
@@ -511,6 +591,13 @@ def _attempt_llm(
                 rf.confidence = 0.0
         else:
             rf.value = None
+    # 상품명: 원문에 있는 표기로 교정한다(하이라이트·상품 동일성 판정의 기준값).
+    nf = by_name.get("product_name")
+    if nf is not None and nf.value:
+        grounded = ground_product_name(nf.value, parsed.raw_text)
+        if grounded != nf.value:
+            nf.value = grounded
+            nf.confidence = 0.7 if grounded else 0.0
     # 날짜: 상품설명서(간이투자설명서 포함)에는 계약일·설명일이 없다.
     # 발행일·기준일을 계약일로 오인하면 DATE-001이 실행마다 흔들린다(실측).
     if doc_type == "product_description":
@@ -606,6 +693,103 @@ def _fill_risk_grade_from_vision(
             return
 
 
+_VISION_CONTRACT_DATE_PROMPT = (
+    "이 서류에 기재된 계약 체결일(신청일)을 YYYY-MM-DD 형식으로만 출력하세요. "
+    "기재되어 있지 않으면 '없음'. 다른 말은 하지 마세요."
+)
+
+
+def ground_scanned_date(answer: str | None, text: str) -> str | None:
+    """비전이 읽은 날짜를 원문 숫자와 대조해 채택 여부를 정한다.
+
+    비전이 지어낸 날짜를 그대로 쓰지 않도록, 연·월·일 숫자가 모두 원문에
+    존재할 때만 채택한다(위험등급·상품명에 적용한 원문 대조와 같은 원칙).
+    """
+    m = re.search(r"(20\d{2})[-./](\d{1,2})[-./](\d{1,2})", answer or "")
+    if not m:
+        return None
+    year, month, day = m.group(1), int(m.group(2)), int(m.group(3))
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    compact = re.sub(r"\s+", "", text)
+    for part in (year, f"{month:02d}", f"{day:02d}"):
+        if part not in compact:
+            return None  # 원문에 없는 숫자 → 환각으로 보고 폐기
+    return f"{year}-{month:02d}-{day:02d}"
+
+
+def vision_scan_contract_date(image_bytes: bytes, text: str) -> str | None:
+    """페이지 이미지에서 계약일을 읽고, 그 숫자가 원문에도 있는지 대조한다.
+
+    실측: 계약서의 날짜는 표 양식이라 텍스트 추출이 '년 월 일 24 07 2026'처럼
+    라벨과 값을 분리·역순으로 내놓는다. 어떤 날짜 정규식으로도 파싱되지 않아
+    DATE-001이 한 번도 판정된 적이 없었다.
+    """
+    answer = _vision_ask(image_bytes, _VISION_CONTRACT_DATE_PROMPT, "vision-cdate", max_tokens=24)
+    return ground_scanned_date(answer, text)
+
+
+_DATE_DOC_TYPES = ("application", "acknowledgement")
+_ACK_DOC_TYPES = ("application", "acknowledgement", "suitability_form")
+_VISION_SIGN_MAX_PAGES = 4  # 서명란은 보통 앞·뒤 몇 쪽 안에 있다. 비용 상한.
+
+
+def _fill_contract_date_from_vision(
+    result: ExtractionResult, parsed: ParsedDocument, renderer: PageRenderer
+) -> None:
+    """계약서·확인서에서 계약일을 못 얻었으면 페이지 그림에서 읽는다."""
+    if result.doc_type not in _DATE_DOC_TYPES:
+        return
+    field = next((f for f in result.fields if f.name == "contract_date"), None)
+    if field is None or field.value:
+        return
+    for page_number in range(1, _VISION_SIGN_MAX_PAGES + 1):
+        image = renderer(page_number)
+        if not image:
+            break
+        value = vision_scan_contract_date(image, parsed.raw_text)
+        if value:
+            field.value = value
+            field.confidence = 0.85
+            field.page = page_number
+            return
+
+
+def _verify_acknowledgement_with_vision(
+    result: ExtractionResult, renderer: PageRenderer
+) -> None:
+    """고객확인 값을 '서명이 실제로 있는가'로 대체한다.
+
+    텍스트에서 뽑은 True는 약관 문구를 읽은 결과일 수 있어 서명 유무를 구분하지
+    못한다. 한 쪽이라도 서명이 기재돼 있으면 확인, 서명란이 있는데 전부 비어
+    있으면 미서명(ACK-001이 위험으로 잡는다), 서명란이 없으면 미확인으로 둔다.
+    """
+    if result.doc_type not in _ACK_DOC_TYPES:
+        return
+    field = next((f for f in result.fields if f.name == "customer_acknowledgement"), None)
+    if field is None:
+        return
+    verdict: str | None = None
+    for page_number in range(1, _VISION_SIGN_MAX_PAGES + 1):
+        image = renderer(page_number)
+        if not image:
+            break
+        answer = vision_scan_signature(image)
+        if answer == SIGNED:
+            verdict = SIGNED
+            field.page = page_number
+            break
+        if answer == UNSIGNED:
+            verdict = UNSIGNED  # 계속 보되, 뒤에서 서명을 찾으면 그쪽이 우선
+    if verdict is not None:
+        field.value = verdict
+        field.confidence = 0.85
+    elif field.value:
+        # 서명란을 찾지 못했는데 텍스트만 보고 True를 낸 값은 근거가 없다.
+        field.value = None
+        field.confidence = 0.0
+
+
 def extract_document(
     parsed: ParsedDocument,
     use_llm: bool = True,
@@ -618,6 +802,8 @@ def extract_document(
     # 텍스트에 값이 없고 그림에만 있는 위험등급(체크표시 양식)을 마지막으로 보완한다.
     if page_renderer is not None:
         _fill_risk_grade_from_vision(result, parsed, page_renderer)
+        _fill_contract_date_from_vision(result, parsed, page_renderer)
+        _verify_acknowledgement_with_vision(result, page_renderer)
     # 마지막에 유형별 고정 스키마로 맞춘다 — 같은 양식이면 같은 필드 목록이 나온다.
     apply_doc_type_schema(result)
     return result

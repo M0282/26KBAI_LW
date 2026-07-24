@@ -63,3 +63,110 @@ def test_schema_keeps_missing_fields_as_none():
     apply_doc_type_schema(result)
     assert all(f.value is None for f in result.fields)
     assert len(result.fields) == len(DOC_TYPE_FIELDS["product_description"])
+
+
+# --- 상품명 원문 대조 (PKG-001의 비교 기준값을 지키기 위한 회귀) ---
+# 실측: 원문 '신한금융투자 제 23129호 파생결합증권(ELS)'을 LLM이
+# '신한금융투자 23129호 파생결합증권(주가연계증권)(ELS)'로 바꿔 냈다.
+# 문서에 없는 이름은 하이라이트가 불가능하고, 같은 상품을 다른 상품으로
+# 판정하게 만든다.
+ELS_TEXT = (
+    "확인·숙지하여 주시기 바랍니다 - 신한금융투자 제 23129호 파생결합증권(ELS) "
+    "(원금비보장형) 투자 위험등급 : 2등급(고위험)"
+)
+
+
+def test_product_name_kept_when_present_in_text():
+    from src.parser.financial_extractor import ground_product_name
+
+    name = "신한금융투자 제 23129호 파생결합증권(ELS)"
+    assert ground_product_name(name, ELS_TEXT) == name
+
+
+def test_product_name_ignores_whitespace_differences():
+    from src.parser.financial_extractor import ground_product_name
+
+    name = "신한금융투자제23129호파생결합증권(ELS)"
+    assert ground_product_name(name, ELS_TEXT) == name
+
+
+def test_hallucinated_product_name_is_repaired_to_verbatim_text():
+    from src.parser.financial_extractor import ground_product_name
+
+    repaired = ground_product_name(
+        "신한금융투자 23129호 파생결합증권(주가연계증권)(ELS)", ELS_TEXT
+    )
+    assert repaired is not None
+    # 복원값은 원문에 그대로 존재해야 한다(공백 무시 비교).
+    assert repaired.replace(" ", "") in ELS_TEXT.replace(" ", "")
+    assert "주가연계증권" not in repaired
+
+
+def test_unrelated_product_name_is_discarded():
+    from src.parser.financial_extractor import ground_product_name
+
+    assert ground_product_name("삼성전자 우선주 ETF 상장지수펀드", ELS_TEXT) is None
+
+
+# --- 고객확인은 '서명이 실제로 있는가'로 판정한다 (ACK-001) ---
+# 실측: 계약서의 '서명' 언급은 전부 약관 조문이고 서명란은 텍스트상 공란인데
+# LLM은 그 문구만 읽고 True를 냈다. 서명이 2쪽에 그림으로 있어 결과는 맞았지만,
+# 미서명 서류였어도 똑같이 True가 나왔을 것이다.
+def test_unsigned_document_is_flagged_as_risk():
+    from src.common.schemas import CheckStatus, ParsedField
+    from src.parser.financial_extractor import UNSIGNED
+    from src.verify.financial_rules import check_acknowledgement
+
+    docs = [ParsedDocument(
+        document_id="c", doc_type="application", raw_text="x",
+        fields=[ParsedField(name="customer_acknowledgement", value=UNSIGNED, confidence=1.0)],
+    )]
+    assert check_acknowledgement(docs).status is CheckStatus.RISK
+
+
+def test_signed_document_is_not_treated_as_negative():
+    from src.common.schemas import CheckStatus, ParsedField
+    from src.parser.financial_extractor import SIGNED
+    from src.verify.financial_rules import check_acknowledgement
+
+    docs = [ParsedDocument(
+        document_id="c", doc_type="application", raw_text="x",
+        fields=[ParsedField(name="customer_acknowledgement", value=SIGNED, confidence=1.0)],
+    )]
+    assert check_acknowledgement(docs).status is not CheckStatus.RISK
+
+
+def test_missing_acknowledgement_is_missing_not_pass():
+    from src.common.schemas import CheckStatus
+    from src.verify.financial_rules import check_acknowledgement
+
+    docs = [ParsedDocument(document_id="c", doc_type="application", raw_text="x", fields=[])]
+    assert check_acknowledgement(docs).status is CheckStatus.MISSING
+
+
+# --- 계약일 원문 대조 (DATE-001) ---
+# 실측: 계약서의 날짜는 표 양식이라 텍스트가 '년 월 일 24 07 2026'처럼
+# 라벨과 값이 분리·역순으로 추출된다. 어떤 날짜 정규식으로도 파싱되지 않아
+# DATE-001이 한 번도 판정되지 못했다. 비전으로 읽되 지어낸 값은 막는다.
+CONTRACT_TEXT = "저축자 성명 서명(인) 생년월일 : 저축자 주소 : 년 월 일 24 07 2026 대리인 성명"
+
+
+def test_scanned_date_accepted_when_digits_present_in_text():
+    from src.parser.financial_extractor import ground_scanned_date
+
+    assert ground_scanned_date("2026-07-24", CONTRACT_TEXT) == "2026-07-24"
+
+
+def test_scanned_date_rejected_when_absent_from_text():
+    from src.parser.financial_extractor import ground_scanned_date
+
+    # 원문에 없는 연도 → 환각으로 보고 폐기
+    assert ground_scanned_date("2019-07-24", CONTRACT_TEXT) is None
+
+
+def test_scanned_date_rejects_non_date_answers():
+    from src.parser.financial_extractor import ground_scanned_date
+
+    assert ground_scanned_date("없음", CONTRACT_TEXT) is None
+    assert ground_scanned_date(None, CONTRACT_TEXT) is None
+    assert ground_scanned_date("2026-13-45", CONTRACT_TEXT) is None

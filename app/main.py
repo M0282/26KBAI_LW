@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import os
 import sys
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -23,7 +24,13 @@ from src.parser.financial_extractor import DOC_TYPES, extract_document, field_ma
 from src.parser.pdf_loader import load_pdf, to_parsed_document
 from src.parser.pdf_render import render_highlighted_page
 from src.verify.ai_reasoner import build_legal_issues
-from src.verify.financial_rules import LAW_HINTS, run_package_checks
+from src.verify.financial_rules import (
+    DEFAULT_PROFILE_MIN_ALLOWED_GRADE,
+    LAW_HINTS,
+    run_package_checks,
+)
+from src.verify.metrics import compute_metrics
+from src.verify.reverify import diff_checks
 
 KB_YELLOW = "#FCAF17"
 KB_YELLOW_ALT = "#FDB913"
@@ -93,6 +100,7 @@ if not uploaded:
         st.markdown('<div class="kb-card"><h3>③ 근거 기반 판정</h3><p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>', unsafe_allow_html=True)
     st.stop()
 
+started_at = time.perf_counter()  # 정량 지표(처리 시간) 측정 시작
 pdf_details = {}
 pdf_bytes_map = {}
 parsed_documents: list[ParsedDocument] = []
@@ -197,7 +205,45 @@ for check in checks:
         else:
             st.warning("법령 청크가 없습니다. `python -m src.ingest.fetch_regulations` 실행 또는 LAW_API_OC 설정이 필요합니다.")
 
-st.subheader("3. 서류 원문 하이라이트")
+st.subheader("3. 정량 지표")
+metrics = compute_metrics(parsed_documents, checks, time.perf_counter() - started_at)
+saved_seconds = max(metrics.manual_baseline_seconds - metrics.elapsed_seconds, 0)
+metric_row = st.columns(4)
+metric_row[0].metric("검증 문서", f"{metrics.document_count}건")
+metric_row[1].metric("검사 항목", f"{metrics.check_count}개")
+metric_row[2].metric("차단(위험·누락)", f"{metrics.blocker_count}건")
+metric_row[3].metric("처리 시간", f"{metrics.elapsed_seconds:.1f}초")
+st.caption(
+    f"수작업 기준 {metrics.manual_baseline_seconds / 60:.0f}분 대비 "
+    f"{saved_seconds / 60:.1f}분 단축 (문서당 15분 가정). "
+    "판정은 결정론적 규칙이 내리므로 같은 서류·같은 정책이면 언제나 같은 결과입니다."
+)
+
+st.subheader("4. 규정 개정 재검증")
+st.caption("규정이 개정되면 같은 서류의 판정이 달라질 수 있습니다. 정책을 바꿔 즉시 재검증합니다.")
+policy_cols = st.columns(len(DEFAULT_PROFILE_MIN_ALLOWED_GRADE))
+revised_policy = {}
+for col, (profile_name, minimum) in zip(policy_cols, DEFAULT_PROFILE_MIN_ALLOWED_GRADE.items()):
+    revised_policy[profile_name] = col.number_input(
+        f"{profile_name} 최소 허용등급", min_value=1, max_value=6, value=int(minimum),
+        key=f"policy_{profile_name}",
+    )
+if revised_policy != dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE):
+    revised_checks = run_package_checks(parsed_documents, profile_min_grade=revised_policy)
+    diff = diff_checks(checks, revised_checks)
+    st.info(diff.summary_line())
+    for check in diff.added:
+        st.error(f"신규 위반 · {check.rule_id} · {check.description}")
+    for check in diff.resolved:
+        st.success(f"해소 · {check.rule_id} · {check.description}")
+    for before, after in diff.changed:
+        label_before = STATUS_LABEL[before.status][0]
+        label_after = STATUS_LABEL[after.status][0]
+        st.warning(f"상태 변화 · {before.rule_id} · {label_before} → {label_after}")
+else:
+    st.caption("현행 정책 기준입니다. 위 값을 바꾸면 개정 전/후 판정 차이를 즉시 보여줍니다.")
+
+st.subheader("5. 서류 원문 하이라이트")
 selected_doc = st.selectbox("문서 선택", options=[document.document_id for document in parsed_documents])
 selected = next(document for document in parsed_documents if document.document_id == selected_doc)
 selected_pdf = pdf_details[selected_doc]
