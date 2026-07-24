@@ -122,11 +122,46 @@ _RISK_GRADE_RE = re.compile(r"[1-6]\s*등급")
 # 실물 상품설명서는 "(투자) 위험 등급  N등급(…위험)" 형태로 위험등급을 명시한다.
 # LLM/규칙이 놓쳐도 전체 원문에서 이 패턴으로 보완 추출한다(결정론적·무료).
 _RISK_GRADE_SCAN = re.compile(r"위험\s*등급[^0-9]{0,10}?([1-6])\s*등급")
+# 운용사 상품설명서의 표준 문구: "…변동성을 감안하여 6등급으로 분류하였습니다".
+# 라벨('투자위험등급')과 값 사이에 설명 문장이 길게 끼어 위 근접 스캔이 놓치던 형태다.
+# '분류/부여/결정'이라는 확정 동사가 붙으므로 범례표의 등급 나열과 혼동되지 않는다.
+_RISK_GRADE_DECLARED = re.compile(r"([1-6])등급(?:으로|을)?(?:분류|부여|결정|산정)")
+# PDF 줄바꿈이 단어 한가운데를 자른다(실측: "6등급으로 분 류하였습니다").
+# 공백을 지운 사본에서 매칭해야 이런 문서를 놓치지 않는다.
+_WHITESPACE = re.compile(r"\s+")
 
 
 def scan_risk_grade(text: str) -> str | None:
+    """문서에 명시된 위험등급을 결정론적으로 뽑는다(LLM보다 우선).
+
+    확정 문구("N등급으로 분류")를 근접 스캔보다 먼저 본다. 근접 스캔은 범례표가
+    있는 문서에서 잘못된 등급을 집을 여지가 있으나, 확정 문구는 그 위험이 없다.
+    """
+    m = _RISK_GRADE_DECLARED.search(_WHITESPACE.sub("", text))
+    if m:
+        return f"{m.group(1)}등급"
     m = _RISK_GRADE_SCAN.search(text)
     return f"{m.group(1)}등급" if m else None
+
+
+def grade_supported_by_text(grade: str | None, text: str) -> bool:
+    """추출된 위험등급이 원문에 실제로 존재하는지 확인(환각 차단).
+
+    실측: 원문에 '6등급'만 있는 상품설명서에서 LLM이 '5등급'을 냈고, 그 값으로
+    적합성 판정까지 내려갔다. 문서에 없는 등급은 근거 하이라이트도 불가능하므로
+    판정에 쓰면 안 된다.
+    """
+    if not grade:
+        return False
+    m = re.match(r"\s*([1-6])", grade)
+    if not m:
+        return False
+    n = m.group(1)
+    compact = _WHITESPACE.sub("", text)  # 줄바꿈으로 잘린 표기도 인정
+    return bool(
+        re.search(rf"{n}등급", compact)
+        or re.search(rf"위험등급[^0-9]{{0,20}}{n}(?![0-9])", compact)
+    )
 
 
 # 적합성 진단표의 투자성향 명시 문구("투자성향은 '위험중립형'", "투자성향 : 안정형").
@@ -220,6 +255,9 @@ def extract_rule_based(parsed: ParsedDocument, locator: Locator | None = None) -
             if grade:
                 risk_field.value = grade
                 risk_field.confidence = 0.9
+            elif not grade_supported_by_text(risk_field.value, text):
+                risk_field.value = None
+                risk_field.confidence = 0.0
         else:
             risk_field.value = None
     # 투자성향: 적합성 진단표에서 명시 문구 스캔.
@@ -364,6 +402,10 @@ def _attempt_llm(
             if grade:
                 rf.value = grade
                 rf.confidence = 0.9
+            elif not grade_supported_by_text(rf.value, parsed.raw_text):
+                # 원문에 없는 등급 = 환각. 오판보다 '미확인'이 안전하다.
+                rf.value = None
+                rf.confidence = 0.0
         else:
             rf.value = None
     # 투자성향: '적합성 진단표'에서 명시 문구를 권위로 삼는다.
