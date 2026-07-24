@@ -23,6 +23,8 @@ class RuleLawHint:
 LAW_HINTS: dict[str, RuleLawHint] = {
     "PKG-001": RuleLawHint(
         "금융상품 판매 서류 상품 동일성 설명 확인",
+        # 조문 힌트가 없으면 BM25가 정의·유형 조문(제2·3·4조)을 상위로 올려 근거가 겉돈다.
+        preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률",),
     ),
     "FIT-001": RuleLawHint(

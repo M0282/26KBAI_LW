@@ -182,11 +182,14 @@ for check in checks:
             allow_live=live_law,
         )
         if legal_results:
-            st.markdown("**관련 법령 원문 후보**")
-            for result in legal_results:
-                st.markdown(f"- **{result.citation}** · {result.title} · 출처 `{result.origin}`")
+            st.markdown("**관련 법령 원문 후보** (검색 상위 3건, 첫 번째가 최우선 근거)")
+            for rank, result in enumerate(legal_results, start=1):
+                tag = "최우선 근거" if rank == 1 else f"참고 {rank}"
+                st.markdown(f"- `{tag}` **{result.citation}** · {result.title} · 출처 `{result.origin}`")
+                # 조문 원문은 길어서 펼침으로 둔다(판정 화면이 법령 본문에 묻히지 않도록).
                 if result.text:
-                    st.caption(result.text[:700])
+                    with st.expander(f"{result.citation} 원문 보기"):
+                        st.caption(result.text[:700])
         else:
             st.warning("법령 청크가 없습니다. `python -m src.ingest.fetch_regulations` 실행 또는 LAW_API_OC 설정이 필요합니다.")
 
@@ -199,13 +202,23 @@ selected_value = st.selectbox("찾을 추출값", options=field_values) if field
 if selected_value:
     hits = selected_pdf.locate(selected_value)
     if hits:
-        first = hits[0]
+        # 여러 페이지에 등장하면 전부 알려주고 골라 볼 수 있게 한다(첫 페이지만 보이던 문제).
+        hit_pages = [hit["page"] for hit in hits]
+        if len(hits) > 1:
+            st.caption(
+                f"'{selected_value}'이(가) {len(hits)}개 페이지에 등장합니다 → "
+                + ", ".join(f"{page}쪽" for page in hit_pages)
+            )
+            chosen_page = st.selectbox("하이라이트할 페이지", options=hit_pages, key="highlight_page")
+        else:
+            chosen_page = hit_pages[0]
+        hit = next(h for h in hits if h["page"] == chosen_page)
         image = render_highlighted_page(
             pdf_bytes_map[selected_doc],
-            page_number=first["page"],
-            rects=first["rects"],
+            page_number=hit["page"],
+            rects=hit["rects"],
         )
-        st.image(image, caption=f"{selected_doc} · {first['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
+        st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
         with st.expander("좌표 데이터"):
             st.json(hits, expanded=False)
     else:
