@@ -81,11 +81,6 @@ with st.sidebar:
     # 조용히 틀린 결과를 보여주느니 아예 막는다.
     use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=has_key, disabled=not has_key)
     live_law = st.toggle("국가법령정보 API 최신 원문 보강", value=bool(os.environ.get("LAW_API_OC")))
-    # 생년월일은 개인정보라 추출하지 않는다. 녹취 의무 판단에 필요하므로 검토자가 입력한다.
-    elderly_investor = st.checkbox(
-        "고령투자자(만 65세 이상)", value=False,
-        help="해당하면 고위험 상품이 아니어도 녹취 의무 대상일 수 있습니다.",
-    )
     # 이전 문구는 "키가 없으면 규칙 기반으로 자동 전환됩니다"였는데, 실측 결과
     # 규칙 폴백은 4개 문서를 전부 '상품설명서'로 분류해 쓸모 있는 판정이 0건이었다.
     # 지키지 못하는 약속을 화면에 두지 않는다.
@@ -155,6 +150,13 @@ for slot in range(st.session_state.package_count):
             key=f"pkg_upload_{slot}",
             help="PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
             "OCR이 흐릿한 사진·다크모드 화면을 못 읽으면 AI 비전 판독으로 자동 전환합니다.",
+        )
+        # 고령 여부는 고객마다 다르다. 생년월일은 개인정보라 추출하지 않으므로
+        # 판매 건마다 검토자가 직접 표시한다(전역 설정이면 다른 고객에게도 적용된다).
+        st.checkbox(
+            "이 건의 고객은 고령투자자(만 65세 이상)입니다",
+            key=f"elderly_{slot}",
+            help="해당하면 고위험 상품이 아니어도 녹취 의무 대상일 수 있습니다.",
         )
         uploaded_packages.append(list(files or []))
 
@@ -286,12 +288,17 @@ for order, slot in enumerate(active_slots, start=1):
     if not documents and not failures:
         continue
     slot_checks, slot_issues = (
-        verify_package(tuple(d.model_dump_json() for d in documents), use_llm, elderly_investor)
+        verify_package(
+            tuple(d.model_dump_json() for d in documents),
+            use_llm,
+            bool(st.session_state.get(f"elderly_{slot}")),
+        )
         if documents else ([], {})
     )
     packages.append({
         "slot": slot,
         "label": f"판매 건 {slot + 1}",
+        "elderly": bool(st.session_state.get(f"elderly_{slot}")),
         "documents": documents,
         "pdfs": pdfs,
         "raw": raw_map,
@@ -328,6 +335,7 @@ if len(packages) > 1:
         summary_rows.append({
             "판매 건": package["label"],
             "상품": product,
+            "고령투자자": "예" if package["elderly"] else "—",
             "종합 판정": verdict,
             "위험": counts[CheckStatus.RISK],
             "누락": counts[CheckStatus.MISSING],
@@ -553,6 +561,7 @@ report = {
         "vision_model": os.environ.get("VISION_MODEL", "claude-haiku-4-5"),
         "live_law_lookup": live_law,
         "profile_min_grade": dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE),
+        "elderly_investor": package["elderly"],
     },
     "documents": [
         {
