@@ -47,7 +47,57 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
     ),
+    "ADV-001": RuleLawHint(
+        "투자성 상품 부당권유 금지 단정적 판단 원금보장 표현",
+        preferred_articles=("21",),
+        preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+    ),
+    "DOC-001": RuleLawHint(
+        "금융상품 판매 계약서류 제공의무 기록 유지 관리",
+        preferred_articles=("23",),
+        preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+    ),
 }
+
+# 금소법 21조: 투자성 상품에 '손실이 없다'는 단정적 판단을 제공하는 것은 금지된다.
+# 다만 실물 서류에는 같은 낱말이 정반대 맥락으로 흔하게 등장한다(실측):
+#   - "원금이 보장되지 않으며 전부 손실될 수 있습니다"  → 올바른 고지
+#   - "원금보장추구형 구조화 상품"                      → 상품 유형 명칭
+# 그래서 낱말만 보면 오탐 100%다. 부정 표현과 유형 명칭을 먼저 걷어낸다.
+_GUARANTEE_CLAIMS = (
+    r"원금[이은을]?보장",
+    r"원금[이은을]?보전",
+    r"확정수익",
+    r"수익[을이]?보장",
+    r"손실[이은]?없",
+    r"절대안전",
+    r"반드시수익",
+)
+# 뒤에 이런 표현이 붙으면 위반이 아니다(부정 고지 또는 상품 유형명).
+# '여'는 사실상 언제나 '여부'(원금보장 여부)다 — 중립적 질의 표현이지 보장 약속이 아니다.
+# 머리글이 낱말 사이에 끼어 '여부'가 쪼개지는 실물 사례가 있어 '여'만으로도 인정한다.
+_CLAIM_EXCEPTIONS = (
+    "되지", "되지않", "않", "아닙", "아니", "없는", "불가", "추구", "형", "여", "제외",
+)
+_EXCEPTION_WINDOW = 12  # 표현 직후 이 글자 수 안에 예외어가 있으면 정상으로 본다
+
+
+_PAGE_ARTIFACT = re.compile(r"-\s*\d{1,4}\s*-")  # 쪽번호가 낱말 중간에 끼어든다
+
+
+def find_guarantee_claims(text: str) -> list[str]:
+    """부당권유 소지가 있는 단정적 표현을 찾는다(부정 고지·유형명은 제외)."""
+    # 실측: "원금보장여-168-부와 관계없이"처럼 쪽번호가 낱말을 쪼개 예외 판정을 방해한다.
+    compact = re.sub(r"\s+", "", _PAGE_ARTIFACT.sub("", text))
+    found: list[str] = []
+    for pattern in _GUARANTEE_CLAIMS:
+        for match in re.finditer(pattern, compact):
+            tail = compact[match.end() : match.end() + _EXCEPTION_WINDOW]
+            if any(token in tail for token in _CLAIM_EXCEPTIONS):
+                continue  # "원금보장되지 않습니다" / "원금보장추구형" → 정상
+            start = max(0, match.start() - 20)
+            found.append(compact[start : match.end() + 20])
+    return found
 
 # 숫자가 작을수록 위험도가 높다. 값은 대회 MVP용 예시이며 실제 은행 정책으로 교체한다.
 DEFAULT_PROFILE_MIN_ALLOWED_GRADE = {
@@ -249,6 +299,76 @@ def check_explanations(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
+# 21조는 '판매자가 고객에게 한 표현'을 규율한다. 적합성 진단표의 투자목적은
+# 고객이 원하는 바를 적은 것이라(실측: "투자목적: 원금보전 및 예금수준 안정수익")
+# 검사 대상이 아니다.
+_ADVICE_DOC_TYPES = ("product_description", "application", "acknowledgement")
+
+
+def check_unfair_solicitation(documents: list[ParsedDocument]) -> RuleCheck:
+    """부당권유 금지 — 원금보장·확정수익 등 단정적 표현이 있는지(금소법 21조)."""
+    targets = [d for d in documents if d.doc_type in _ADVICE_DOC_TYPES]
+    if not targets:
+        return RuleCheck(
+            rule_id="ADV-001",
+            description="부당권유 금지 표현 검사",
+            status=CheckStatus.WARNING,
+            document_excerpt="검사할 판매 서류가 없습니다.",
+            suggestion="상품설명서·가입신청서를 업로드하세요.",
+        )
+    hits = [
+        (document.document_id, claim)
+        for document in sorted(targets, key=lambda d: d.document_id)
+        for claim in find_guarantee_claims(document.raw_text)
+    ]
+    if hits:
+        return RuleCheck(
+            rule_id="ADV-001",
+            description="부당권유 금지 표현 검사",
+            status=CheckStatus.RISK,
+            document_excerpt=" / ".join(f"{name}: …{claim}…" for name, claim in hits[:3]),
+            suggestion="원금·수익을 보장하는 단정적 표현은 투자성 상품에 사용할 수 없습니다. "
+            "해당 문구의 사용 경위와 정정 여부를 확인하세요.",
+        )
+    return RuleCheck(
+        rule_id="ADV-001",
+        description="부당권유 금지 표현 검사",
+        status=CheckStatus.PASS,
+        document_excerpt=f"판매 서류 {len(targets)}건에서 원금보장·확정수익 등 단정적 표현 없음",
+    )
+
+
+# 판매 시 갖춰야 할 서류 4종. 하나라도 없으면 교차 검증 자체가 불완전해진다.
+REQUIRED_DOC_TYPES = ("suitability_form", "product_description", "application", "acknowledgement")
+REQUIRED_DOC_LABELS = {
+    "suitability_form": "적합성 진단표",
+    "product_description": "상품설명서",
+    "application": "가입신청서",
+    "acknowledgement": "설명 확인서",
+}
+
+
+def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
+    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조)."""
+    present = {d.doc_type for d in documents}
+    missing = [t for t in REQUIRED_DOC_TYPES if t not in present]
+    if not missing:
+        return RuleCheck(
+            rule_id="DOC-001",
+            description="판매서류 4종 구비 여부",
+            status=CheckStatus.PASS,
+            document_excerpt="적합성 진단표·상품설명서·가입신청서·설명 확인서 모두 확인",
+        )
+    labels = ", ".join(REQUIRED_DOC_LABELS[t] for t in missing)
+    return RuleCheck(
+        rule_id="DOC-001",
+        description="판매서류 4종 구비 여부",
+        status=CheckStatus.MISSING,
+        document_excerpt=f"누락 서류: {labels}",
+        suggestion=f"{labels}를 업로드하세요. 서류가 빠지면 해당 항목은 검증할 수 없습니다.",
+    )
+
+
 def check_explanation(document: ParsedDocument) -> RuleCheck:
     values = field_map(document)
     semantic = {
@@ -375,4 +495,72 @@ def run_package_checks(
     ]
     product_documents = [document for document in documents if document.doc_type == "product_description"]
     checks.append(check_explanations(documents))
+    checks.append(check_unfair_solicitation(documents))
+    checks.append(check_document_set(documents))
     return checks
+
+
+def _identity_keys(document: ParsedDocument) -> set[str]:
+    """이 서류가 가리키는 상품 식별 키(코드·기본 상품명 모두).
+
+    서류마다 코드만 적힌 것, 상품명만 적힌 것이 섞여 있어 하나만 쓰면 같은 상품이
+    다른 판매건으로 쪼개진다(실측: 코드가 있는 설명서와 이름만 있는 계약서가 분리됨).
+    """
+    values = field_map(document)
+    keys: set[str] = set()
+    if values.get("product_code"):
+        keys.add("code:" + _identity_key(values["product_code"]))
+    if values.get("product_name"):
+        keys.add("name:" + _base_identity_key(values["product_name"]))
+    return keys
+
+
+def group_documents_by_product(
+    documents: list[ParsedDocument],
+) -> list[tuple[str, list[ParsedDocument]]]:
+    """여러 판매건이 섞여 올라왔을 때 상품별로 나눈다.
+
+    키를 하나라도 공유하면 같은 판매건으로 합친다(코드↔상품명 다리 역할).
+    적합성 진단표처럼 상품 식별값이 없는 서류는 고객 단위 문서이므로 모든 판매건에
+    포함한다(한 고객의 투자성향은 그 고객의 모든 판매건에 적용된다).
+    상품이 하나뿐이면 나누지 않고 전체를 한 건으로 돌려준다.
+    """
+    shared = [d for d in documents if not _identity_keys(d)]
+    targets = [d for d in documents if _identity_keys(d)]
+
+    # 키를 공유하는 서류들을 하나의 묶음으로 합친다(간단한 union-find).
+    parent: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        parent.setdefault(key, key)
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for document in targets:
+        keys = sorted(_identity_keys(document))
+        for key in keys[1:]:
+            union(keys[0], key)
+
+    buckets: dict[str, list[ParsedDocument]] = {}
+    for document in targets:
+        root = find(sorted(_identity_keys(document))[0])
+        buckets.setdefault(root, []).append(document)
+
+    if len(buckets) <= 1:
+        return [("전체", list(documents))]
+
+    groups: list[tuple[str, list[ParsedDocument]]] = []
+    for members in buckets.values():
+        label = next(
+            (field_map(d).get("product_name") for d in members if field_map(d).get("product_name")),
+            "상품 미상",
+        )
+        groups.append((label, members + shared))
+    return sorted(groups, key=lambda pair: pair[0])
