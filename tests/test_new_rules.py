@@ -6,6 +6,7 @@
   "원금보장 여부와 관계없이"                        → 중립적 질의 표현
 실물 코퍼스 17건에서 오탐 0건을 확인한 뒤 이 테스트로 고정한다.
 """
+from __future__ import annotations
 from src.common.schemas import CheckStatus, ParsedDocument, ParsedField
 from src.verify.financial_rules import (
     check_document_set,
@@ -67,3 +68,48 @@ def test_missing_document_is_named():
     check = check_document_set(docs)
     assert check.status is CheckStatus.MISSING
     assert "설명 확인서" in check.document_excerpt
+
+
+# --- 비대면 판매: 설명확인서가 다른 서류에 통합된 경우 ---
+# 모바일 펀드 가입에서는 설명확인서가 별도 파일로 존재하지 않고, 가입신청서 안의
+# 확인 문구 + 전자서명으로 대체된다. 실측 — 집합투자증권 계약서에 다음이 있다:
+#   "위 계약내용에 대해 모두 확인하였으며, 주요내용을 충분히 설명듣고 이해하였습니다"
+# 이때 '누락'을 내면 ACK-001(고객확인 확인됨)과 모순된다. 서류는 계속 요구하되
+# 위반이 아닌 확인 사항으로 낮춘다.
+INTEGRATED_CONTRACT = (
+    "집합투자증권 저축계약서\n위 계약내용에 대해 모두 확인하였으며, "
+    "주요내용을 충분히 설명듣고 이해하였습니다.\n저축자 성명 서명(인)"
+)
+
+
+def _package_without_ack(ack_value: str | None, contract_text: str):
+    docs = [
+        _doc("진단표", "suitability_form", customer_profile="위험중립형"),
+        _doc("설명서", "product_description", product_risk_level="4등급"),
+        _doc("계약서", "application", contract_text,
+             **({"customer_acknowledgement": ack_value} if ack_value else {})),
+    ]
+    return docs
+
+
+def test_integrated_acknowledgement_is_warning_not_missing():
+    from src.parser.financial_extractor import SIGNED
+
+    check = check_document_set(_package_without_ack(SIGNED, INTEGRATED_CONTRACT))
+    assert check.status is CheckStatus.WARNING
+    assert "별도 파일로 없으나" in check.document_excerpt
+
+
+def test_truly_missing_acknowledgement_stays_missing():
+    """확인 문구도 고객 확인값도 없으면 그대로 누락이다."""
+    check = check_document_set(_package_without_ack(None, "집합투자증권 저축계약서 약관"))
+    assert check.status is CheckStatus.MISSING
+    assert "설명 확인서" in check.document_excerpt
+
+
+def test_unsigned_integrated_form_is_not_excused():
+    """확인 문구가 있어도 고객이 서명하지 않았으면 면제되지 않는다."""
+    from src.parser.financial_extractor import UNSIGNED
+
+    check = check_document_set(_package_without_ack(UNSIGNED, INTEGRATED_CONTRACT))
+    assert check.status is CheckStatus.MISSING
