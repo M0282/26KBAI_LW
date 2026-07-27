@@ -113,3 +113,53 @@ def test_unsigned_integrated_form_is_not_excused():
 
     check = check_document_set(_package_without_ack(UNSIGNED, INTEGRATED_CONTRACT))
     assert check.status is CheckStatus.MISSING
+
+
+# --- REC-001: 녹취 의무 대상 표시 ---
+# 이 도구는 오디오를 판독하지 않는다. 녹취가 있었는지는 확인하지 못하므로
+# '녹취가 필요한 판매 건인지'만 표시해 담당자가 놓치지 않게 한다.
+def _rec_docs(profile: str, grade: str):
+    return [
+        _doc("진단표", "suitability_form", customer_profile=profile),
+        _doc("설명서", "product_description", product_risk_level=grade),
+    ]
+
+
+def test_ordinary_sale_is_not_recording_target():
+    from src.verify.financial_rules import check_recording_requirement
+
+    check = check_recording_requirement(_rec_docs("적극투자형", "4등급"))
+    assert check.status is CheckStatus.PASS
+
+
+def test_high_risk_product_flags_recording():
+    from src.verify.financial_rules import check_recording_requirement
+
+    check = check_recording_requirement(_rec_docs("공격투자형", "1등급"))
+    assert check.status is CheckStatus.WARNING
+    assert "고위험" in check.document_excerpt
+
+
+def test_elderly_investor_flags_recording_even_on_low_risk():
+    from src.verify.financial_rules import check_recording_requirement
+
+    check = check_recording_requirement(_rec_docs("적극투자형", "4등급"), elderly_investor=True)
+    assert check.status is CheckStatus.WARNING
+    assert "고령투자자" in check.document_excerpt
+
+
+def test_unsuitable_sale_flags_recording():
+    """부적합 상품을 판매하면 서류 서명만으로 요건을 갖추지 못한다."""
+    from src.verify.financial_rules import check_recording_requirement
+
+    check = check_recording_requirement(_rec_docs("안정형", "3등급"))
+    assert check.status is CheckStatus.WARNING
+    assert "부적합" in check.document_excerpt
+
+
+def test_recording_check_never_claims_to_verify_audio():
+    """음성을 판독하지 않는다는 사실을 반드시 밝힌다(과장 방지)."""
+    from src.verify.financial_rules import check_recording_requirement
+
+    check = check_recording_requirement(_rec_docs("공격투자형", "1등급"))
+    assert "음성 파일을 판독하지 않습니다" in (check.suggestion or "")
