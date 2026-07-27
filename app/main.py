@@ -30,6 +30,7 @@ from src.verify.ai_reasoner import build_legal_issues
 from src.verify.financial_rules import (
     DEFAULT_PROFILE_MIN_ALLOWED_GRADE,
     LAW_HINTS,
+    group_documents_by_product,
     run_package_checks,
 )
 from src.verify.metrics import compute_metrics
@@ -78,20 +79,29 @@ div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radi
 with st.sidebar:
     st.header("검증 설정")
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=has_key)
+    # LLM을 끈 채로도 화면은 멀쩡히 뜨지만 판정은 전부 '미확인'이 된다(실측: 유효 판정 0건).
+    # 조용히 틀린 결과를 보여주느니 아예 막는다.
+    use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=has_key, disabled=not has_key)
     live_law = st.toggle("국가법령정보 API 최신 원문 보강", value=bool(os.environ.get("LAW_API_OC")))
     # 이전 문구는 "키가 없으면 규칙 기반으로 자동 전환됩니다"였는데, 실측 결과
     # 규칙 폴백은 4개 문서를 전부 '상품설명서'로 분류해 쓸모 있는 판정이 0건이었다.
     # 지키지 못하는 약속을 화면에 두지 않는다.
-    if not has_key:
-        st.error("ANTHROPIC_API_KEY가 없습니다. 문서 분류·필드 추출 정확도가 크게 떨어집니다.")
     st.caption(
-        "LLM을 끄면 규칙 기반으로만 동작합니다. 규칙 분류는 실물 서류에서 유형을 "
-        "구분하지 못하는 경우가 많아 대부분의 항목이 '미확인'으로 남습니다."
+        "LLM 없이는 실물 서류의 문서유형·필드를 신뢰할 수 있게 추출하지 못해 "
+        "대부분의 항목이 '미확인'으로 남습니다. 잘못된 판정을 내놓는 대신 검증을 중단합니다."
     )
     st.divider()
     st.markdown("**MVP 검증 규칙**")
-    st.code("PKG-001\nFIT-001\nEXP-001\nDATE-001\nACK-001", language=None)
+    st.code(
+        "PKG-001  상품 동일성\n"
+        "FIT-001  적합성 (17조)\n"
+        "EXP-001  설명의무 (19조)\n"
+        "DATE-001 설명-계약 선후 (19조)\n"
+        "ACK-001  설명 확인 증빙 (19조)\n"
+        "ADV-001  부당권유 금지 (21조)\n"
+        "DOC-001  서류 구비 (23조)",
+        language=None,
+    )
     st.divider()
     st.markdown("**개인정보 처리**")
     st.caption(
@@ -103,12 +113,31 @@ with st.sidebar:
         removed = clear_llm_cache()
         st.success(f"캐시 {removed}건을 삭제했습니다.")
 
+if not has_key:
+    # 키가 없으면 업로드 자체를 막는다. 화면은 뜨지만 판정이 전부 '미확인'이 되는
+    # 상태로 시연하면 도구를 신뢰할 수 없다.
+    st.error(
+        "**ANTHROPIC_API_KEY가 설정되지 않아 검증을 시작할 수 없습니다.**\n\n"
+        "이 도구는 비정형 서류에서 판정에 필요한 값을 읽기 위해 LLM 판독이 필요합니다. "
+        "키 없이도 화면은 뜨지만 문서유형·필드를 신뢰할 수 있게 추출하지 못해 "
+        "모든 항목이 '미확인'으로 남습니다. 잘못된 판정을 내놓는 대신 중단합니다."
+    )
+    st.code("프로젝트 루트의 .env 파일에\nANTHROPIC_API_KEY=sk-ant-...", language=None)
+    st.stop()
+
+st.markdown("#### 판매서류 업로드")
+st.info(
+    "**한 판매 건에 필요한 서류 4종을 함께 올려주세요.**\n\n"
+    "① **적합성 진단표** — 고객 투자성향 ② **상품설명서**(투자설명서) — 상품 위험등급 "
+    "③ **가입신청서**(계약서) — 계약일·서명 ④ **설명 확인서** — 설명 이행 확인\n\n"
+    "서류가 빠지면 그 항목은 검증할 수 없어 '누락'으로 표시됩니다. "
+    "**여러 판매 건을 한 번에 올려도 됩니다** — 상품별로 자동 분리해 각각 판정합니다."
+)
 uploaded = st.file_uploader(
-    "판매서류 패키지 업로드",
+    "파일 선택 (PDF · JPG · PNG)",
     type=["pdf", "jpg", "jpeg", "png"],
     accept_multiple_files=True,
-    help="적합성 진단표, 상품설명서, 가입신청서, 설명 확인서를 함께 올리세요. "
-    "PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
+    help="PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
     "OCR이 흐릿한 사진·다크모드 화면을 못 읽으면 AI 비전 판독으로 자동 전환합니다.",
 )
 
@@ -223,7 +252,56 @@ if errors:
 if not parsed_documents:
     st.stop()
 
-st.success(f"{len(parsed_documents)}개 문서를 하나의 판매 패키지로 분석했습니다.")
+# 여러 판매 건이 섞여 올라올 수 있다. 상품별로 나눠 각각 판정한 뒤,
+# 건이 여럿이면 요약을 먼저 보여주고 하나를 골라 상세를 본다.
+package_groups = group_documents_by_product(parsed_documents)
+
+if len(package_groups) > 1:
+    st.success(f"{len(parsed_documents)}개 문서에서 판매 건 {len(package_groups)}개를 확인했습니다.")
+    st.subheader("판매 건 요약")
+    st.caption("상품별로 자동 분리했습니다. 고객 단위 서류(적합성 진단표)는 모든 건에 함께 적용됩니다.")
+
+    summary_rows = []
+    group_checks: dict[str, list] = {}
+    for label, members in package_groups:
+        member_checks, _ = verify_package(
+            tuple(document.model_dump_json() for document in members), use_llm
+        )
+        group_checks[label] = member_checks
+        counts = {status: sum(c.status == status for c in member_checks) for status in CheckStatus}
+        if counts[CheckStatus.RISK]:
+            verdict = "판매 진행 부적합"
+        elif counts[CheckStatus.MISSING]:
+            verdict = "추가 증빙 필요"
+        elif counts[CheckStatus.WARNING]:
+            verdict = "조건부 적합"
+        else:
+            verdict = "적합"
+        summary_rows.append({
+            "판매 건": label,
+            "종합 판정": verdict,
+            "위험": counts[CheckStatus.RISK],
+            "누락": counts[CheckStatus.MISSING],
+            "주의": counts[CheckStatus.WARNING],
+            "통과": counts[CheckStatus.PASS],
+            "서류": len(members),
+        })
+    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+    total_risk = sum(row["위험"] for row in summary_rows)
+    if total_risk:
+        st.error(f"판매 건 {len(package_groups)}개 중 위반 소지 **{total_risk}건**이 확인됐습니다.")
+
+    st.divider()
+    selected_package = st.selectbox(
+        "상세를 볼 판매 건 선택",
+        options=[label for label, _ in package_groups],
+        key="selected_package",
+    )
+    parsed_documents = next(m for label, m in package_groups if label == selected_package)
+    st.markdown(f"#### 선택한 판매 건: {selected_package}")
+else:
+    st.success(f"{len(parsed_documents)}개 문서를 하나의 판매 건으로 분석했습니다.")
 
 st.subheader("1. AI 문서 분류·핵심 필드 추출")
 columns = st.columns(min(len(parsed_documents), 4))
@@ -297,8 +375,9 @@ else:
 
 # 검사 범위를 밝히지 않으면 '통과'가 '금소법 준수'로 읽힌다.
 st.caption(
-    "검사 범위: **금융소비자보호법 제17조(적합성원칙)·제19조(설명의무)** 관련 5개 항목. "
-    "적정성(18조)·불공정영업(20조)·부당권유(21조)·광고(22조)는 이 도구의 검사 대상이 아닙니다."
+    "검사 범위: **금융소비자보호법 제17조(적합성)·제19조(설명의무)·제21조(부당권유)·"
+    "제23조(계약서류 제공)** 관련 7개 항목. "
+    "적정성(18조)·불공정영업(20조)·광고(22조)는 이 도구의 검사 대상이 아닙니다."
 )
 metric_cols = st.columns(4)
 for col, status in zip(metric_cols, [CheckStatus.PASS, CheckStatus.WARNING, CheckStatus.MISSING, CheckStatus.RISK]):
