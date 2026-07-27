@@ -30,11 +30,9 @@ from src.verify.ai_reasoner import build_legal_issues
 from src.verify.financial_rules import (
     DEFAULT_PROFILE_MIN_ALLOWED_GRADE,
     LAW_HINTS,
-    group_documents_by_product,
     run_package_checks,
 )
 from src.verify.metrics import compute_metrics
-from src.verify.reverify import diff_checks
 
 KB_YELLOW = "#FCAF17"
 KB_YELLOW_ALT = "#FDB913"
@@ -127,29 +125,54 @@ if not has_key:
 
 st.markdown("#### 판매서류 업로드")
 st.info(
-    "**한 판매 건에 필요한 서류 4종을 함께 올려주세요.**\n\n"
-    "① **적합성 진단표** — 고객 투자성향 ② **상품설명서**(투자설명서) — 상품 위험등급 "
-    "③ **가입신청서**(계약서) — 계약일·서명 ④ **설명 확인서** — 설명 이행 확인\n\n"
+    "**한 판매 건(상품 계약 1개)마다 그 칸에 서류 4종을 올려주세요.**\n\n"
+    "① **적합성 진단표** — 고객 투자성향 ② **상품설명서**(투자설명서) — 상품 위험등급 "
+    "③ **가입신청서**(계약서) — 계약일·서명 ④ **설명 확인서** — 설명 이행 확인\n\n"
     "서류가 빠지면 그 항목은 검증할 수 없어 '누락'으로 표시됩니다. "
-    "**여러 판매 건을 한 번에 올려도 됩니다** — 상품별로 자동 분리해 각각 판정합니다."
-)
-uploaded = st.file_uploader(
-    "파일 선택 (PDF · JPG · PNG)",
-    type=["pdf", "jpg", "jpeg", "png"],
-    accept_multiple_files=True,
-    help="PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
-    "OCR이 흐릿한 사진·다크모드 화면을 못 읽으면 AI 비전 판독으로 자동 전환합니다.",
+    "여러 계약을 검증하려면 아래 **판매 건 추가**로 칸을 늘리세요 — 칸별로 따로 판정합니다."
 )
 
-if not uploaded:
+# 판매 건을 칸으로 나눠 받는다.
+# 예전에는 한 칸에 전부 받고 상품명으로 자동 분리했는데, 적합성 진단표처럼 상품 식별
+# 정보가 없는 서류는 어느 계약 것인지 알 수 없어 모든 계약에 붙었다(실측: 서로 다른
+# 금융사 진단표 2건이 양쪽 판매 건에 배정됨 → 임의의 투자성향으로 판정될 위험).
+# 사용자가 직접 나누면 추측이 사라지고, 수정도 해당 칸의 파일만 교체하면 된다.
+st.session_state.setdefault("package_count", 1)
+
+uploaded_packages: list[list] = []
+for slot in range(st.session_state.package_count):
+    with st.container(border=True):
+        files = st.file_uploader(
+            f"판매 건 {slot + 1} — 서류 4종 (PDF · JPG · PNG)",
+            type=["pdf", "jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key=f"pkg_upload_{slot}",
+            help="PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
+            "OCR이 흐릿한 사진·다크모드 화면을 못 읽으면 AI 비전 판독으로 자동 전환합니다.",
+        )
+        uploaded_packages.append(list(files or []))
+
+add_col, remove_col, _ = st.columns([1, 1, 4])
+if add_col.button("＋ 판매 건 추가", use_container_width=True):
+    st.session_state.package_count += 1
+    st.rerun()
+if st.session_state.package_count > 1 and remove_col.button(
+    "－ 마지막 칸 제거", use_container_width=True
+):
+    st.session_state.pop(f"pkg_upload_{st.session_state.package_count - 1}", None)
+    st.session_state.package_count -= 1
+    st.rerun()
+
+if not any(uploaded_packages):
     left, center, right = st.columns(3)
     with left:
-        st.markdown('<div class="kb-card"><h3>① 판매서류 패키지</h3><p>여러 PDF를 한 번에 업로드해 하나의 판매 건으로 묶습니다.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-card"><h3>① 판매 건별 업로드</h3><p>상품 계약 하나에 필요한 서류 4종을 한 칸에 올립니다.</p></div>', unsafe_allow_html=True)
     with center:
         st.markdown('<div class="kb-card kb-step"><h3>② AI 문서 이해</h3><p>문서 분류, 필드 추출, 표현 정규화와 법적 검색 쟁점을 생성합니다.</p></div>', unsafe_allow_html=True)
     with right:
         st.markdown('<div class="kb-card"><h3>③ 근거 기반 판정</h3><p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>', unsafe_allow_html=True)
     st.stop()
+
 
 @st.cache_data(show_spinner=False, max_entries=64)
 def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_type: str | None = None):
@@ -207,42 +230,133 @@ READ_ERROR_HINTS = {
     "FzErrorFormat": "지원하지 않는 파일 형식입니다(PDF·JPG·PNG만 가능).",
 }
 
+
+def process_package(files: list, slot: int):
+    """판매 건 한 칸의 파일들을 판독해 (문서목록, PDF, 원본bytes, 추출메타, 오류)를 돌려준다."""
+    documents: list[ParsedDocument] = []
+    pdfs: dict[str, object] = {}
+    raw_map: dict[str, bytes] = {}
+    meta: dict[str, object] = {}
+    failures: list[str] = []
+    seen: set[str] = set()
+
+    for order, file in enumerate(files, start=1):
+        # 같은 이름이 두 번 올라오면 dict 키가 겹쳐 한 건이 조용히 사라진다.
+        name = file.name
+        if name in seen:
+            suffix = 2
+            while f"{name} ({suffix})" in seen:
+                suffix += 1
+            name = f"{name} ({suffix})"
+        seen.add(name)
+        try:
+            raw_bytes = file.getvalue()
+            # 검토자가 앞선 실행에서 문서유형을 교정했다면 그 값으로 다시 추출한다.
+            pdf, raw_text, result = process_document(
+                raw_bytes, name, use_llm, st.session_state.get(f"doctype::{slot}::{name}")
+            )
+            documents.append(ParsedDocument(
+                document_id=name, doc_type=result.doc_type, fields=result.fields, raw_text=raw_text,
+            ))
+            pdfs[name] = pdf
+            raw_map[name] = raw_bytes
+            meta[name] = result
+        except Exception as exc:
+            hint = READ_ERROR_HINTS.get(type(exc).__name__, "")
+            failures.append(f"{name}: {hint or f'{type(exc).__name__} - {exc}'}")
+    return documents, pdfs, raw_map, meta, failures
+
+
 started_at = time.perf_counter()
-pdf_details = {}
-pdf_bytes_map = {}
-parsed_documents: list[ParsedDocument] = []
-extraction_meta = {}
-errors: list[str] = []
-seen_names: set[str] = set()
+active_slots = [slot for slot, files in enumerate(uploaded_packages) if files]
+packages = []
 
 progress = st.progress(0.0, text="서류를 판독하는 중…")
-for index, file in enumerate(uploaded, start=1):
-    # 같은 이름이 두 번 올라오면 dict 키가 겹쳐 한 건이 조용히 사라진다.
-    name = file.name
-    if name in seen_names:
-        suffix = 2
-        while f"{name} ({suffix})" in seen_names:
-            suffix += 1
-        name = f"{name} ({suffix})"
-    seen_names.add(name)
-
-    progress.progress((index - 1) / len(uploaded), text=f"[{index}/{len(uploaded)}] {name} 판독 중…")
-    try:
-        raw_bytes = file.getvalue()
-        # 검토자가 앞선 실행에서 문서유형을 교정했다면 그 값으로 다시 추출한다.
-        pdf, raw_text, result = process_document(
-            raw_bytes, name, use_llm, st.session_state.get(f"doctype::{name}")
-        )
-        parsed_documents.append(ParsedDocument(
-            document_id=name, doc_type=result.doc_type, fields=result.fields, raw_text=raw_text,
-        ))
-        pdf_details[name] = pdf
-        pdf_bytes_map[name] = raw_bytes
-        extraction_meta[name] = result
-    except Exception as exc:
-        hint = READ_ERROR_HINTS.get(type(exc).__name__, "")
-        errors.append(f"{name}: {hint or f'{type(exc).__name__} - {exc}'}")
+for order, slot in enumerate(active_slots, start=1):
+    progress.progress(
+        (order - 1) / len(active_slots), text=f"판매 건 {slot + 1} 판독 중… ({order}/{len(active_slots)})"
+    )
+    documents, pdfs, raw_map, meta, failures = process_package(uploaded_packages[slot], slot)
+    if not documents and not failures:
+        continue
+    slot_checks, slot_issues = (
+        verify_package(tuple(d.model_dump_json() for d in documents), use_llm)
+        if documents else ([], {})
+    )
+    packages.append({
+        "slot": slot,
+        "label": f"판매 건 {slot + 1}",
+        "documents": documents,
+        "pdfs": pdfs,
+        "raw": raw_map,
+        "meta": meta,
+        "errors": failures,
+        "checks": slot_checks,
+        "issues": slot_issues,
+    })
 progress.empty()
+
+if not packages:
+    st.error("읽을 수 있는 서류가 없습니다.")
+    st.stop()
+
+# 여러 판매 건이면 요약을 먼저 보여주고, 하나를 골라 상세로 들어간다.
+if len(packages) > 1:
+    st.subheader("판매 건 요약")
+    st.caption("칸별로 따로 판정한 결과입니다. 상세를 보려면 아래에서 판매 건을 선택하세요.")
+
+    summary_rows = []
+    for package in packages:
+        counts = {s: sum(c.status == s for c in package["checks"]) for s in CheckStatus}
+        if counts[CheckStatus.RISK]:
+            verdict = "판매 진행 부적합"
+        elif counts[CheckStatus.MISSING]:
+            verdict = "추가 증빙 필요"
+        elif counts[CheckStatus.WARNING]:
+            verdict = "조건부 적합"
+        else:
+            verdict = "적합"
+        product = next(
+            (v for d in package["documents"] if (v := field_map(d).get("product_name"))), "상품 미상"
+        )
+        summary_rows.append({
+            "판매 건": package["label"],
+            "상품": product,
+            "종합 판정": verdict,
+            "위험": counts[CheckStatus.RISK],
+            "누락": counts[CheckStatus.MISSING],
+            "주의": counts[CheckStatus.WARNING],
+            "통과": counts[CheckStatus.PASS],
+            "서류": len(package["documents"]),
+        })
+    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+    total_risk = sum(row["위험"] for row in summary_rows)
+    if total_risk:
+        st.error(f"판매 건 {len(packages)}개 중 위반 소지 **{total_risk}건**이 확인됐습니다.")
+    else:
+        st.success(f"판매 건 {len(packages)}개 모두 위반 소지가 발견되지 않았습니다.")
+
+    st.divider()
+    chosen = st.selectbox(
+        "상세를 볼 판매 건",
+        options=[p["label"] for p in packages],
+        key="selected_package",
+    )
+    package = next(p for p in packages if p["label"] == chosen)
+    st.markdown(f"#### {package['label']} 상세")
+else:
+    package = packages[0]
+    st.success(f"{len(package['documents'])}개 문서를 하나의 판매 건으로 분석했습니다.")
+
+parsed_documents = package["documents"]
+pdf_details = package["pdfs"]
+pdf_bytes_map = package["raw"]
+extraction_meta = package["meta"]
+errors = package["errors"]
+checks = package["checks"]
+issues = package["issues"]
+active_slot = package["slot"]
 
 if errors:
     st.error(
@@ -252,56 +366,6 @@ if errors:
 if not parsed_documents:
     st.stop()
 
-# 여러 판매 건이 섞여 올라올 수 있다. 상품별로 나눠 각각 판정한 뒤,
-# 건이 여럿이면 요약을 먼저 보여주고 하나를 골라 상세를 본다.
-package_groups = group_documents_by_product(parsed_documents)
-
-if len(package_groups) > 1:
-    st.success(f"{len(parsed_documents)}개 문서에서 판매 건 {len(package_groups)}개를 확인했습니다.")
-    st.subheader("판매 건 요약")
-    st.caption("상품별로 자동 분리했습니다. 고객 단위 서류(적합성 진단표)는 모든 건에 함께 적용됩니다.")
-
-    summary_rows = []
-    group_checks: dict[str, list] = {}
-    for label, members in package_groups:
-        member_checks, _ = verify_package(
-            tuple(document.model_dump_json() for document in members), use_llm
-        )
-        group_checks[label] = member_checks
-        counts = {status: sum(c.status == status for c in member_checks) for status in CheckStatus}
-        if counts[CheckStatus.RISK]:
-            verdict = "판매 진행 부적합"
-        elif counts[CheckStatus.MISSING]:
-            verdict = "추가 증빙 필요"
-        elif counts[CheckStatus.WARNING]:
-            verdict = "조건부 적합"
-        else:
-            verdict = "적합"
-        summary_rows.append({
-            "판매 건": label,
-            "종합 판정": verdict,
-            "위험": counts[CheckStatus.RISK],
-            "누락": counts[CheckStatus.MISSING],
-            "주의": counts[CheckStatus.WARNING],
-            "통과": counts[CheckStatus.PASS],
-            "서류": len(members),
-        })
-    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
-
-    total_risk = sum(row["위험"] for row in summary_rows)
-    if total_risk:
-        st.error(f"판매 건 {len(package_groups)}개 중 위반 소지 **{total_risk}건**이 확인됐습니다.")
-
-    st.divider()
-    selected_package = st.selectbox(
-        "상세를 볼 판매 건 선택",
-        options=[label for label, _ in package_groups],
-        key="selected_package",
-    )
-    parsed_documents = next(m for label, m in package_groups if label == selected_package)
-    st.markdown(f"#### 선택한 판매 건: {selected_package}")
-else:
-    st.success(f"{len(parsed_documents)}개 문서를 하나의 판매 건으로 분석했습니다.")
 
 st.subheader("1. AI 문서 분류·핵심 필드 추출")
 columns = st.columns(min(len(parsed_documents), 4))
@@ -334,7 +398,7 @@ for index, document in enumerate(parsed_documents):
             options=options,
             index=options.index(document.doc_type) if document.doc_type in options else 0,
             format_func=lambda t: DOC_TYPES[t][0],
-            key=f"doctype::{document.document_id}",
+            key=f"doctype::{active_slot}::{document.document_id}",
             help="교정하면 그 유형 기준으로 다시 추출·판정합니다.",
         )
         # 값이 있는 필드만 보여주면 같은 양식인데 목록이 달라 보인다.
@@ -353,11 +417,6 @@ for index, document in enumerate(parsed_documents):
             st.dataframe(rows, hide_index=True, use_container_width=True)
         else:
             st.caption("추출된 핵심 필드 없음")
-
-with st.spinner("패키지 교차 검증 중…"):
-    checks, issues = verify_package(
-        tuple(document.model_dump_json() for document in parsed_documents), use_llm
-    )
 
 st.subheader("2. 패키지 교차 검증·법령 근거")
 summary_counts = {status: sum(check.status == status for check in checks) for status in CheckStatus}
@@ -437,31 +496,7 @@ st.caption(
     "판정은 결정론적 규칙이 내리므로 같은 서류·같은 정책이면 언제나 같은 결과입니다."
 )
 
-st.subheader("4. 규정 개정 재검증")
-st.caption("규정이 개정되면 같은 서류의 판정이 달라질 수 있습니다. 정책을 바꿔 즉시 재검증합니다.")
-policy_cols = st.columns(len(DEFAULT_PROFILE_MIN_ALLOWED_GRADE))
-revised_policy = {}
-for col, (profile_name, minimum) in zip(policy_cols, DEFAULT_PROFILE_MIN_ALLOWED_GRADE.items()):
-    revised_policy[profile_name] = col.number_input(
-        f"{profile_name} 최소 허용등급", min_value=1, max_value=6, value=int(minimum),
-        key=f"policy_{profile_name}",
-    )
-if revised_policy != dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE):
-    revised_checks = run_package_checks(parsed_documents, profile_min_grade=revised_policy)
-    diff = diff_checks(checks, revised_checks)
-    st.info(diff.summary_line())
-    for check in diff.added:
-        st.error(f"신규 위반 · {check.rule_id} · {check.description}")
-    for check in diff.resolved:
-        st.success(f"해소 · {check.rule_id} · {check.description}")
-    for before, after in diff.changed:
-        label_before = STATUS_LABEL[before.status][0]
-        label_after = STATUS_LABEL[after.status][0]
-        st.warning(f"상태 변화 · {before.rule_id} · {label_before} → {label_after}")
-else:
-    st.caption("현행 정책 기준입니다. 위 값을 바꾸면 개정 전/후 판정 차이를 즉시 보여줍니다.")
-
-st.subheader("5. 서류 원문 하이라이트")
+st.subheader("4. 서류 원문 하이라이트")
 selected_doc = st.selectbox("문서 선택", options=[document.document_id for document in parsed_documents])
 selected = next(document for document in parsed_documents if document.document_id == selected_doc)
 selected_pdf = pdf_details[selected_doc]
@@ -497,7 +532,7 @@ if selected_value:
             "추출 오류(문서에 없는 값) 또는 OCR 오독일 수 있으니 원본을 확인하세요."
         )
 
-st.subheader("6. 검증 결과 내보내기")
+st.subheader("5. 검증 결과 내보내기")
 st.caption(
     "컴플라이언스 기록물은 '언제·어떤 기준으로 판정했는가'가 핵심입니다. "
     "판정·근거 조문과 함께 검증 시각·사용 모델·적용 정책을 담아 내려받습니다."

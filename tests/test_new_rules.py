@@ -11,7 +11,6 @@ from src.verify.financial_rules import (
     check_document_set,
     check_unfair_solicitation,
     find_guarantee_claims,
-    group_documents_by_product,
 )
 
 
@@ -68,23 +67,3 @@ def test_missing_document_is_named():
     check = check_document_set(docs)
     assert check.status is CheckStatus.MISSING
     assert "설명 확인서" in check.document_excerpt
-
-
-# --- 판매건 분리 ---
-def test_single_product_is_not_split():
-    docs = [_doc("a", "product_description", product_code="X1"),
-            _doc("b", "application", product_code="X1")]
-    assert len(group_documents_by_product(docs)) == 1
-
-
-def test_multiple_products_are_split_and_share_customer_docs():
-    """상품 식별값이 없는 고객 단위 서류(진단표)는 모든 판매건에 포함된다."""
-    docs = [
-        _doc("진단표", "suitability_form", customer_profile="안정형"),
-        _doc("설명서A", "product_description", product_code="AAA", product_name="펀드A"),
-        _doc("설명서B", "product_description", product_code="BBB", product_name="펀드B"),
-    ]
-    groups = group_documents_by_product(docs)
-    assert len(groups) == 2
-    for _, members in groups:
-        assert any(d.document_id == "진단표" for d in members)
