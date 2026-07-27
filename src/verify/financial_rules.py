@@ -348,6 +348,35 @@ REQUIRED_DOC_LABELS = {
 }
 
 
+# 비대면(모바일) 판매에서는 설명확인서가 별도 파일로 존재하지 않고 가입신청서 안의
+# 확인 문구 + 전자서명으로 대체된다. 실측 — 집합투자증권 계약서에 다음이 들어 있다:
+#   "위 계약내용에 대해 모두 확인하였으며, 주요내용을 충분히 설명듣고 이해하였습니다"
+# 이때 별도 서류가 없다는 이유로 '누락'을 내면 ACK-001(고객확인 확인됨)과 모순된다.
+_ACK_SUBSTITUTE_PHRASES = (
+    "설명듣고이해", "설명을듣고이해", "설명을이해", "충분히설명", "설명을들었",
+    "이해하였습니다", "인지하였습니다",
+)
+
+
+def _is_negative_ack(value: str) -> bool:
+    """서류가 '확인받지 못했다'고 적은 표현인지(미서명 / 없음 / 미확인 …)."""
+    return any(
+        token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
+    )
+
+
+def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
+    """설명확인 증빙이 다른 서류에 통합돼 있는지(확인 문구 + 고객 확인값)."""
+    values = [v for _, v in _documents_with(documents, "customer_acknowledgement")]
+    confirmed = any(v and not _is_negative_ack(v) for v in values)
+    if not confirmed:
+        return False
+    return any(
+        any(p in re.sub(r"\s+", "", d.raw_text) for p in _ACK_SUBSTITUTE_PHRASES)
+        for d in documents
+    )
+
+
 def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
     """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조)."""
     present = {d.doc_type for d in documents}
@@ -359,13 +388,25 @@ def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
             status=CheckStatus.PASS,
             document_excerpt="적합성 진단표·상품설명서·가입신청서·설명 확인서 모두 확인",
         )
+    # 설명확인서만 없고 그 내용이 다른 서류에 통합돼 있으면 비대면 판매의 정상 형태다.
+    # 서류 자체는 계속 요구하되(회사는 전자문서로 보유해야 한다) 위반이 아닌 확인 사항으로 낮춘다.
+    if missing == ["acknowledgement"] and has_embedded_acknowledgement(documents):
+        return RuleCheck(
+            rule_id="DOC-001",
+            description="판매서류 4종 구비 여부",
+            status=CheckStatus.WARNING,
+            document_excerpt="설명 확인서가 별도 파일로 없으나, 다른 서류에 설명확인 문구와 고객 확인이 포함됨",
+            suggestion="비대면 판매의 전자적 확인(체크 동의·전자서명)으로 보입니다. "
+            "전자문서함에 보관된 설명확인 기록을 함께 확인하세요.",
+        )
     labels = ", ".join(REQUIRED_DOC_LABELS[t] for t in missing)
     return RuleCheck(
         rule_id="DOC-001",
         description="판매서류 4종 구비 여부",
         status=CheckStatus.MISSING,
         document_excerpt=f"누락 서류: {labels}",
-        suggestion=f"{labels}를 업로드하세요. 서류가 빠지면 해당 항목은 검증할 수 없습니다.",
+        suggestion=f"{labels}를 업로드하세요. 서류가 빠지면 해당 항목은 검증할 수 없습니다. "
+        "비대면 판매라면 전자문서함·이메일로 교부된 파일을 내려받아 올리세요.",
     )
 
 
@@ -455,12 +496,7 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
         )
     # 확인값이 여러 건이면 첫 값이 아니라 **부정 증빙을 우선**한다.
     # 한 서류라도 미서명이면 패키지 전체가 위험이다(순서로 결과가 갈리면 안 된다).
-    def _is_negative(value: str) -> bool:
-        return any(
-            token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
-        )
-
-    negatives = [v for _, v in acknowledgements if _is_negative(v)]
+    negatives = [v for _, v in acknowledgements if _is_negative_ack(v)]
     value = negatives[0] if negatives else acknowledgements[0][1]
     negative = bool(negatives)
     if negative:
