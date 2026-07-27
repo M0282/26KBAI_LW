@@ -81,6 +81,11 @@ with st.sidebar:
     # 조용히 틀린 결과를 보여주느니 아예 막는다.
     use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=has_key, disabled=not has_key)
     live_law = st.toggle("국가법령정보 API 최신 원문 보강", value=bool(os.environ.get("LAW_API_OC")))
+    # 생년월일은 개인정보라 추출하지 않는다. 녹취 의무 판단에 필요하므로 검토자가 입력한다.
+    elderly_investor = st.checkbox(
+        "고령투자자(만 65세 이상)", value=False,
+        help="해당하면 고위험 상품이 아니어도 녹취 의무 대상일 수 있습니다.",
+    )
     # 이전 문구는 "키가 없으면 규칙 기반으로 자동 전환됩니다"였는데, 실측 결과
     # 규칙 폴백은 4개 문서를 전부 '상품설명서'로 분류해 쓸모 있는 판정이 0건이었다.
     # 지키지 못하는 약속을 화면에 두지 않는다.
@@ -97,7 +102,8 @@ with st.sidebar:
         "DATE-001 설명-계약 선후 (19조)\n"
         "ACK-001  설명 확인 증빙 (19조)\n"
         "ADV-001  부당권유 금지 (21조)\n"
-        "DOC-001  서류 구비 (23조)",
+        "DOC-001  서류 구비 (23조)\n"
+        "REC-001  녹취 의무 대상 (28조)",
         language=None,
     )
     st.divider()
@@ -192,10 +198,10 @@ def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_ty
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def verify_package(document_payloads: tuple[str, ...], with_llm: bool):
+def verify_package(document_payloads: tuple[str, ...], with_llm: bool, elderly: bool = False):
     """패키지 판정·쟁점 생성. 문서 내용이 같으면 재실행하지 않는다."""
     documents = [ParsedDocument.model_validate_json(p) for p in document_payloads]
-    package_checks = run_package_checks(documents)
+    package_checks = run_package_checks(documents, elderly_investor=elderly)
     return package_checks, build_legal_issues(documents, package_checks, use_llm=with_llm)
 
 
@@ -280,7 +286,7 @@ for order, slot in enumerate(active_slots, start=1):
     if not documents and not failures:
         continue
     slot_checks, slot_issues = (
-        verify_package(tuple(d.model_dump_json() for d in documents), use_llm)
+        verify_package(tuple(d.model_dump_json() for d in documents), use_llm, elderly_investor)
         if documents else ([], {})
     )
     packages.append({
@@ -435,7 +441,7 @@ else:
 # 검사 범위를 밝히지 않으면 '통과'가 '금소법 준수'로 읽힌다.
 st.caption(
     "검사 범위: **금융소비자보호법 제17조(적합성)·제19조(설명의무)·제21조(부당권유)·"
-    "제23조(계약서류 제공)** 관련 7개 항목. "
+    "제23조(계약서류 제공)·제28조(기록 유지)** 관련 8개 항목. "
     "적정성(18조)·불공정영업(20조)·광고(22조)는 이 도구의 검사 대상이 아닙니다."
 )
 metric_cols = st.columns(4)

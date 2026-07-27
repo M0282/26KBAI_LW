@@ -57,6 +57,13 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         preferred_articles=("23",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
     ),
+    "REC-001": RuleLawHint(
+        # 녹취 의무의 직접 근거는 자본시장법 시행령·금융투자업규정이라 현재 코퍼스에 없다.
+        # 가장 근접한 금소법 28조(자료의 기록 및 유지·관리)를 근거로 제시한다.
+        "금융상품 판매 과정 자료의 기록 유지 관리 고령투자자 보호",
+        preferred_articles=("28",),
+        preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+    ),
 }
 
 # 금소법 21조: 투자성 상품에 '손실이 없다'는 단정적 판단을 제공하는 것은 금지된다.
@@ -410,6 +417,54 @@ def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
+# 녹취 의무 대상이 되는 고위험 등급(1~2등급). 실제 기준은 상품 종류(파생결합증권 등)와
+# 회사 내부 기준을 함께 보지만, 서류에서 확실히 읽히는 값은 위험등급이라 이를 기준으로 삼는다.
+RECORDING_RISK_GRADES = (1, 2)
+
+
+def check_recording_requirement(
+    documents: list[ParsedDocument], elderly_investor: bool = False
+) -> RuleCheck:
+    """녹취 의무 대상 여부를 표시한다.
+
+    이 도구는 오디오를 판독하지 않으므로 녹취가 실제로 있었는지는 **확인하지 못한다**.
+    대신 '녹취가 필요한 판매 건인지'를 서류에서 판단해 담당자가 놓치지 않게 한다.
+    고위험 상품·고령투자자·부적합 판매는 서류 서명만으로는 요건을 갖추지 못한다.
+
+    elderly_investor: 만 65세 이상 여부. 우리는 개인정보(생년월일)를 추출하지 않으므로
+        화면에서 검토자가 입력한다.
+    """
+    risks = _documents_with(documents, "product_risk_level")
+    grades = [g for _, value in risks if (g := _risk_number(value)) is not None]
+    high_risk = [g for g in grades if g in RECORDING_RISK_GRADES]
+    unsuitable = check_suitability(documents).status is CheckStatus.RISK
+
+    reasons: list[str] = []
+    if high_risk:
+        reasons.append(f"고위험 상품({min(high_risk)}등급)")
+    if elderly_investor:
+        reasons.append("고령투자자(만 65세 이상)")
+    if unsuitable:
+        reasons.append("투자성향 부적합 상품 판매")
+
+    if not reasons:
+        return RuleCheck(
+            rule_id="REC-001",
+            description="판매 과정 녹취 의무 대상 여부",
+            status=CheckStatus.PASS,
+            document_excerpt="녹취 의무 대상 요건에 해당하지 않습니다"
+            + (f" (위험등급 {min(grades)}등급)" if grades else ""),
+        )
+    return RuleCheck(
+        rule_id="REC-001",
+        description="판매 과정 녹취 의무 대상 여부",
+        status=CheckStatus.WARNING,
+        document_excerpt="녹취 의무 대상일 수 있음 — " + ", ".join(reasons),
+        suggestion="이 도구는 음성 파일을 판독하지 않습니다. "
+        "해당 판매 건의 녹취 기록이 실제로 보관돼 있는지 별도로 확인하세요.",
+    )
+
+
 def check_explanation(document: ParsedDocument) -> RuleCheck:
     values = field_map(document)
     semantic = {
@@ -520,6 +575,7 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
 def run_package_checks(
     documents: list[ParsedDocument],
     profile_min_grade: dict[str, int] | None = None,
+    elderly_investor: bool = False,
 ) -> list[RuleCheck]:
     # profile_min_grade: 적합성 등급 매트릭스(규정 파라미터). 개정 시 이 값을 바꿔
     # 재검증하면 판정 변화를 확인할 수 있다(규정 개정 재검증). 기본은 현행 매트릭스.
@@ -533,4 +589,5 @@ def run_package_checks(
     checks.append(check_explanations(documents))
     checks.append(check_unfair_solicitation(documents))
     checks.append(check_document_set(documents))
+    checks.append(check_recording_requirement(documents, elderly_investor=elderly_investor))
     return checks
