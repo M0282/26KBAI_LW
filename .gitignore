@@ -30,10 +30,15 @@ Thumbs.db
 .cache/
 
 # 데모 생성물(스크립트로 재현)
-data/samples/demo/
+# data/samples/demo/ 는 커밋한다 — 가상 고객(김국민) 서류 4종, 총 277KB.
+# 제출본을 받은 사람이 사전 판독 결과(data/demo_results/)로 시연하려면
+# 우리가 해시한 바로 그 파일이 필요하다(재생성하면 바이트가 달라진다).
 
 # 실물 검증용 PDF (다운로드물)
 data/eval/
 
 # 실제 고객 서류(개인정보 — 절대 커밋 금지)
 data/realpkg/
+
+# Office 임시 잠금 파일
+~$*

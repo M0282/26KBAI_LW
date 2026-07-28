@@ -1,0 +1,54 @@
+{
+  "file_name": "04_설명확인서.pdf",
+  "doc_type": "acknowledgement",
+  "fields": [
+    {
+      "name": "product_name",
+      "value": "KB 글로벌 하이일드 증권투자신탁",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "explanation_date",
+      "value": "2026-07-15",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "contract_date",
+      "value": "2026-07-15",
+      "page": 1,
+      "confidence": 0.85
+    },
+    {
+      "name": "customer_acknowledgement",
+      "value": "미서명",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "staff_name",
+      "value": "이판매",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "principal_loss_explained",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    },
+    {
+      "name": "risk_level_explained",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    },
+    {
+      "name": "fees_explained",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "file_name": "03_가입신청서.pdf",
+  "doc_type": "application",
+  "fields": [
+    {
+      "name": "product_name",
+      "value": "KB 글로벌 하이일드 증권투자신탁",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "product_code",
+      "value": "KBGHY-2026",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "contract_date",
+      "value": "2026-07-12",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "customer_acknowledgement",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    },
+    {
+      "name": "staff_name",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    },
+    {
+      "name": "principal_loss_explained",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    },
+    {
+      "name": "fees_explained",
+      "value": null,
+      "page": null,
+      "confidence": 0.0
+    }
+  ]
+}
