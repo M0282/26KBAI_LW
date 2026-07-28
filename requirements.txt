@@ -8,3 +8,4 @@ rank_bm25
 chromadb
 
 pytest>=8
+python-pptx>=1.0,<2
