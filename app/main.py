@@ -23,8 +23,8 @@ load_dotenv(ROOT / ".env", override=False)
 from src.common.llm_cache import clear_llm_cache
 from src.common.schemas import CheckStatus, ParsedDocument
 from src.ingest.law_search import find_legal_basis
+from src.parser.document_loader import load_document, to_parsed_document
 from src.parser.financial_extractor import DOC_TYPES, extract_document, field_map
-from src.parser.pdf_loader import load_pdf, to_parsed_document
 from src.parser.pdf_render import render_highlighted_page
 from src.verify.ai_reasoner import build_legal_issues
 from src.verify.financial_rules import (
@@ -122,7 +122,7 @@ if not has_key:
         "모든 항목이 '미확인'으로 남습니다. 잘못된 판정을 내놓는 대신 중단합니다."
     )
     st.code("프로젝트 루트의 .env 파일에\nANTHROPIC_API_KEY=sk-ant-...", language=None)
-    st.stop()
+    #st.stop()
 
 st.markdown("#### 판매서류 업로드")
 st.info(
@@ -144,12 +144,12 @@ uploaded_packages: list[list] = []
 for slot in range(st.session_state.package_count):
     with st.container(border=True):
         files = st.file_uploader(
-            f"판매 건 {slot + 1} — 서류 4종 (PDF · JPG · PNG)",
-            type=["pdf", "jpg", "jpeg", "png"],
+            f"판매 건 {slot + 1} — 서류 4종 (PDF · JPG · PNG · DOCX · TXT)",
+            type=["pdf", "jpg", "jpeg", "png", "docx", "txt"],
             accept_multiple_files=True,
             key=f"pkg_upload_{slot}",
-            help="PDF가 가장 정확하며, 스캔·사진·스크린샷(JPG/PNG)은 자동 OCR로 인식합니다. "
-            "OCR이 흐릿한 사진·다크모드 화면을 못 읽으면 AI 비전 판독으로 자동 전환합니다.",
+            help="PDF·이미지는 기존 OCR·좌표 파서로 처리합니다. "
+            "DOCX·TXT는 본문과 표/줄 텍스트를 추출해 같은 검증 흐름으로 연결합니다.",
         )
         # 고령 여부는 고객마다 다르다. 생년월일은 개인정보라 추출하지 않으므로
         # 판매 건마다 검토자가 직접 표시한다(전역 설정이면 다른 고객에게도 적용된다).
@@ -174,7 +174,7 @@ if st.session_state.package_count > 1 and remove_col.button(
 if not any(uploaded_packages):
     left, center, right = st.columns(3)
     with left:
-        st.markdown('<div class="kb-card"><h3>① 판매 건별 업로드</h3><p>상품 계약 하나에 필요한 서류 4종을 한 칸에 올립니다.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-card"><h3>① 판매 건별 업로드</h3><p>PDF·이미지·DOCX·TXT 서류를 판매 건별로 한 칸에 올립니다.</p></div>', unsafe_allow_html=True)
     with center:
         st.markdown('<div class="kb-card kb-step"><h3>② AI 문서 이해</h3><p>문서 분류, 필드 추출, 표현 정규화와 법적 검색 쟁점을 생성합니다.</p></div>', unsafe_allow_html=True)
     with right:
@@ -190,13 +190,21 @@ def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_ty
     페이지 선택 하나에도 전체 파이프라인이 재실행돼 실측 10초가 걸렸다(API 비용은
     결과 캐시 덕에 0이지만 로컬 재계산이 병목).
     """
-    pdf = load_pdf(raw_bytes, document_id=file_name)
-    parsed = to_parsed_document(pdf)
-    result = extract_document(
-        parsed, use_llm=with_llm, locator=pdf.locate, page_renderer=pdf.render_page,
-        force_doc_type=forced_type,
+    source_document = load_document(
+        raw_bytes, file_name=file_name, document_id=file_name
     )
-    return pdf, parsed.raw_text, result
+    parsed = to_parsed_document(source_document)
+    source_format = getattr(source_document, "source_format", None)
+    # DOCX/TXT에는 페이지 이미지가 없다. None을 넘겨 비전 후처리가
+    # 텍스트에서 이미 찾은 서명·등급 값을 지우지 않게 한다.
+    page_renderer = (
+        None if source_format in {"docx", "txt"} else source_document.render_page
+    )
+    result = extract_document(
+        parsed, use_llm=with_llm, locator=source_document.locate,
+        page_renderer=page_renderer, force_doc_type=forced_type,
+    )
+    return source_document, parsed.raw_text, result
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -235,7 +243,9 @@ def FIELD_SOURCE_LABEL(field) -> str:
 READ_ERROR_HINTS = {
     "EmptyFileError": "빈 파일입니다.",
     "FileDataError": "PDF가 손상되었거나 형식이 올바르지 않습니다.",
-    "FzErrorFormat": "지원하지 않는 파일 형식입니다(PDF·JPG·PNG만 가능).",
+    "FzErrorFormat": "지원하지 않는 이미지/PDF 형식입니다.",
+    "InvalidDocumentError": "DOCX/TXT가 비어 있거나 손상되어 읽을 수 없습니다.",
+    "UnsupportedDocumentError": "지원하지 않는 파일 형식입니다(PDF·JPG·PNG·DOCX·TXT).",
 }
 
 
@@ -387,10 +397,15 @@ for index, document in enumerate(parsed_documents):
     label = DOC_TYPES.get(document.doc_type, ("분류 불가", []))[0]
     meta = extraction_meta[document.document_id]
     mode = "LLM" if meta.used_llm else "규칙 폴백"
-    source_pdf = pdf_details[document.document_id]
-    if source_pdf.vision_applied:
+    source_document = pdf_details[document.document_id]
+    source_format = getattr(source_document, "source_format", None)
+    if source_format == "docx":
+        read_mode = "DOCX 본문·표 텍스트"
+    elif source_format == "txt":
+        read_mode = "TXT 텍스트"
+    elif source_document.vision_applied:
         read_mode = "AI 비전 판독"  # Tesseract가 못 읽어 LLM 비전으로 전사
-    elif source_pdf.ocr_applied:
+    elif source_document.ocr_applied:
         read_mode = "OCR"
     else:
         read_mode = "텍스트 레이어"
@@ -510,40 +525,57 @@ st.caption(
     "판정은 결정론적 규칙이 내리므로 같은 서류·같은 정책이면 언제나 같은 결과입니다."
 )
 
-st.subheader("4. 서류 원문 하이라이트")
+st.subheader("4. 서류 원문 근거")
 selected_doc = st.selectbox("문서 선택", options=[document.document_id for document in parsed_documents])
 selected = next(document for document in parsed_documents if document.document_id == selected_doc)
-selected_pdf = pdf_details[selected_doc]
+selected_source = pdf_details[selected_doc]
+source_format = getattr(selected_source, "source_format", None)
 field_values = [value for value in field_map(selected).values() if value and value != "확인"]
 selected_value = st.selectbox("찾을 추출값", options=field_values) if field_values else None
 if selected_value:
-    hits = selected_pdf.locate(selected_value)
+    hits = selected_source.locate(selected_value)
     if hits:
-        # 여러 페이지에 등장하면 전부 알려주고 골라 볼 수 있게 한다(첫 페이지만 보이던 문제).
-        hit_pages = [hit["page"] for hit in hits]
+        is_text_source = source_format in {"docx", "txt"}
+        position_key = "block" if is_text_source else "page"
+        position_unit = "블록" if source_format == "docx" else ("줄" if source_format == "txt" else "쪽")
+        positions = [hit[position_key] for hit in hits]
         if len(hits) > 1:
             st.caption(
-                f"'{selected_value}'이(가) {len(hits)}개 페이지에 등장합니다 → "
-                + ", ".join(f"{page}쪽" for page in hit_pages)
+                f"'{selected_value}'이(가) {len(hits)}곳에 등장합니다 → "
+                + ", ".join(f"{position}{position_unit}" for position in positions)
             )
-            chosen_page = st.selectbox("하이라이트할 페이지", options=hit_pages, key="highlight_page")
+            chosen_position = st.selectbox(
+                f"근거 {position_unit} 선택", options=positions,
+                key=f"evidence::{active_slot}::{selected_doc}::{selected_value}",
+            )
         else:
-            chosen_page = hit_pages[0]
-        hit = next(h for h in hits if h["page"] == chosen_page)
-        image = render_highlighted_page(
-            pdf_bytes_map[selected_doc],
-            page_number=hit["page"],
-            rects=hit["rects"],
-        )
-        st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
-        with st.expander("좌표 데이터"):
+            chosen_position = positions[0]
+        hit = next(h for h in hits if h[position_key] == chosen_position)
+
+        if is_text_source:
+            st.info("DOCX/TXT는 고정 PDF 좌표가 없어 실제 원문 블록·줄을 근거로 표시합니다.")
+            excerpt = hit.get("excerpt") or selected_value
+            st.markdown(
+                f'<div class="kb-evidence"><b>원문 근거</b><br>{html.escape(excerpt)}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            image = render_highlighted_page(
+                pdf_bytes_map[selected_doc],
+                page_number=hit["page"],
+                rects=hit["rects"],
+            )
+            st.image(
+                image,
+                caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치",
+                use_container_width=True,
+            )
+        with st.expander("근거 위치 데이터"):
             st.json(hits, expanded=False)
     else:
-        # 좌표 미발견은 대개 '추출값이 원문에 없다'는 뜻이다(환각·OCR 오독).
-        # 원인을 감추지 않고 드러내야 검증 도구로서 신뢰할 수 있다.
         st.warning(
             f"'{selected_value}'이(가) 이 문서 원문에서 발견되지 않았습니다. "
-            "추출 오류(문서에 없는 값) 또는 OCR 오독일 수 있으니 원본을 확인하세요."
+            "추출 오류 또는 문서 판독 오류일 수 있으니 원본을 확인하세요."
         )
 
 st.subheader("5. 검증 결과 내보내기")
@@ -567,6 +599,9 @@ report = {
         {
             "document_id": document.document_id,
             "doc_type": document.doc_type,
+            "source_format": getattr(
+                pdf_details[document.document_id], "source_format", "pdf_or_image"
+            ),
             "fields": [
                 {
                     "name": field.name,
