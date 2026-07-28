@@ -64,7 +64,14 @@ def _make(path: Path, lines: list[tuple[str, int]]) -> None:
         if text:
             page.insert_text((60, y), text, fontname="malgun", fontsize=size)
         y += (size + 10) if size else 12
-    doc.save(str(path))
+    # 한글 폰트를 통째로 임베드하면 파일 하나가 13MB를 넘는다(4종 54MB).
+    # 실제 쓰는 글자만 남겨 제출물 크기를 줄인다.
+    doc.subset_fonts()
+    # 생성 시각 등 메타데이터를 비워 재생성 시에도 바이트가 동일하게 한다.
+    # 사전 판독 결과를 파일 해시로 찾으므로, 재생성으로 해시가 바뀌면 데모가 깨진다.
+    doc.set_metadata({})
+    doc.xref_set_key(-1, "ID", "[<0><0>]")
+    doc.save(str(path), garbage=4, deflate=True)
     doc.close()
 
 
