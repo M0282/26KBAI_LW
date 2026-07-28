@@ -234,28 +234,104 @@ def build() -> Path:
     _para(frame, "· 도입 형태 — 사내 시스템에 붙는 검증 모듈. 판정 규칙은 KB 내부 기준으로 교체 가능하게 분리",
           size=13, color=INK)
 
-    # ── 5. 아키텍처 ─────────────────────────────────────────
-    s = _slide(prs, "아키텍처: LLM은 읽고, 규칙이 판정한다", "규제 도구가 갖춰야 할 재현성을 구조로 보장", tag="기술 적정성")
-    _card(s, Inches(0.62), Inches(1.6), Inches(5.9), Inches(2.5),
-          "왜 LLM에 판정을 맡기지 않는가",
-          ["LLM 판정은 같은 입력에도 결과가 흔들릴 수 있다",
-           "판정 근거를 사후에 재현·감사하기 어렵다",
-           "→ LLM은 비정형 서류에서 '값을 읽는' 역할만",
-           "→ 위반 여부는 코드로 작성된 규칙이 결정"], accent=OK)
-    _card(s, Inches(6.75), Inches(1.6), Inches(5.97), Inches(2.5),
-          "그 결과 얻는 것",
-          ["같은 서류·같은 정책 → 항상 같은 판정",
-           "판정 근거를 조문·원문 위치까지 제시",
-           "규칙을 KB 내부 기준으로 교체해도 구조 불변",
-           "실측: 업로드 순서 24가지 → 판정 조합 1가지"], accent=KB_YELLOW)
+    # ── 5. AS-IS / TO-BE ────────────────────────────────────
+    s = _slide(prs, "업무 흐름 변화", "기존 프로세스를 바꾸지 않고, 서류 작성과 마감 사이에 들어간다",
+               tag="활용 가능성")
+    frame = _textbox(s, Inches(0.62), Inches(1.5), Inches(12.1), Inches(0.4))
+    _para(frame, "AS-IS   현재 창구 업무", size=15, bold=True, color=MUTED, first=True, space_after=0)
+    asis = ["상담·권유", "서류 4종 작성", "직원이 육안 대조", "마감", "컴플라이언스 표본 점검"]
+    for i, step in enumerate(asis):
+        box = s.shapes.add_shape(5, Inches(0.62 + i * 2.46), Inches(1.95), Inches(2.24), Inches(0.62))
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(0xF2, 0xF0, 0xEB)
+        box.line.color.rgb = LINE
+        _para(box.text_frame, step, size=12, color=INK, first=True, align=PP_ALIGN.CENTER, space_after=0)
+    frame = _textbox(s, Inches(0.62), Inches(2.68), Inches(12.1), Inches(0.9))
+    _para(frame, "· 건수가 쌓이면 육안 대조에서 누락이 생깁니다   "
+                 "· 컴플라이언스는 표본만 봅니다 — 전건 확인이 불가능합니다   "
+                 "· 문제를 발견해도 이미 계약이 끝난 뒤입니다",
+          size=12, color=RISK, first=True, space_after=0)
 
-    _table(s, Inches(0.62), Inches(4.4), Inches(12.1), [
-        ["계층", "역할", "구성"],
-        ["판독", "비정형 서류 → 텍스트·좌표", "PyMuPDF · Tesseract OCR · LLM 비전(폴백)"],
-        ["추출", "판정에 필요한 값만 구조화", "Claude Haiku + 원문 대조 검증 + 문서유형 스키마"],
-        ["판정", "위반 여부 결정 (LLM 관여 없음)", "결정론적 규칙 8종 (Python)"],
-        ["근거", "조문·원문 위치 제시", "국가법령정보 API + BM25 조문 검색 + 좌표 하이라이트"],
-    ], col_widths=[1.5, 4.3, 6.3])
+    frame = _textbox(s, Inches(0.62), Inches(3.7), Inches(12.1), Inches(0.4))
+    _para(frame, "TO-BE   제안 시스템 적용", size=15, bold=True, color=KB_GRAY, first=True, space_after=0)
+    tobe = ["상담·권유", "서류 4종 작성", "자동 검증 (약 10초)", "이상 시 즉시 보완", "전건 기록 자동 축적"]
+    for i, step in enumerate(tobe):
+        emphasis = i in (2, 3, 4)
+        box = s.shapes.add_shape(5, Inches(0.62 + i * 2.46), Inches(4.15), Inches(2.24), Inches(0.62))
+        box.fill.solid()
+        box.fill.fore_color.rgb = BG_SOFT if emphasis else RGBColor(0xF2, 0xF0, 0xEB)
+        box.line.color.rgb = KB_YELLOW if emphasis else LINE
+        _para(box.text_frame, step, size=12, bold=emphasis, color=KB_GRAY if emphasis else INK,
+              first=True, align=PP_ALIGN.CENTER, space_after=0)
+
+    _card(s, Inches(0.62), Inches(5.05), Inches(3.85), Inches(1.65),
+          "표본 점검 → 전건 점검",
+          ["사람이 못 보던 건까지 기계가 일관되게 확인",
+           "누락 없이 모든 판매 건에 같은 기준 적용"], accent=OK)
+    _card(s, Inches(4.72), Inches(5.05), Inches(3.85), Inches(1.65),
+          "사후 적발 → 사전 예방",
+          ["계약 완료 전에 보완 기회를 준다",
+           "분쟁·배상으로 가기 전에 차단"], accent=OK)
+    _card(s, Inches(8.82), Inches(5.05), Inches(3.9), Inches(1.65),
+          "기록이 자동으로 남는다",
+          ["판정 근거·조문·검증 시각을 함께 보관",
+           "사후 입증 자료로 그대로 사용"], accent=OK)
+
+    # ── 6. 아키텍처 ─────────────────────────────────────────
+    s = _slide(prs, "아키텍처: LLM은 읽고, 규칙이 판정한다", "읽기와 판정 사이에 '검증 계층'을 둔다",
+               tag="기술 적정성")
+    _table(s, Inches(0.62), Inches(1.5), Inches(12.1), [
+        ["계층", "역할", "LLM 관여", "구성"],
+        ["① 판독", "비정형 서류 → 텍스트·좌표", "폴백 시에만", "PyMuPDF · Tesseract OCR · LLM 비전"],
+        ["② 추출", "판정에 필요한 값만 구조화", "있음", "Claude Haiku"],
+        ["③ 검증", "읽은 값이 원문에 실제로 있는지 대조", "없음", "원문 대조 · 문서유형 게이팅 · 고정 스키마"],
+        ["④ 판정", "위반 여부 결정", "없음", "결정론적 규칙 8종 (Python)"],
+        ["⑤ 근거", "조문·원문 위치 제시", "검색어 생성만", "국가법령정보 API · BM25 · 좌표 하이라이트"],
+    ], col_widths=[1.3, 3.9, 1.6, 5.3], body_size=11)
+
+    _card(s, Inches(0.62), Inches(4.25), Inches(5.9), Inches(2.45),
+          "LLM은 판정을 바꿀 수 없다 — 구조적으로",
+          ["판정 모듈에 LLM 관련 코드 0건 (순수 Python)",
+           "판정 함수에 LLM 인자 자체가 없음",
+           "LLM이 만드는 객체에 '판정' 필드가 없음",
+           "→ 바꾸고 싶어도 손댈 지점이 없다"], accent=OK)
+
+    box = s.shapes.add_shape(5, Inches(6.75), Inches(4.25), Inches(5.97), Inches(2.45))
+    box.fill.solid()
+    box.fill.fore_color.rgb = BG_SOFT
+    box.line.color.rgb = KB_YELLOW
+    frame = _textbox(s, Inches(7.0), Inches(4.42), Inches(5.5), Inches(2.1))
+    _para(frame, "실측 · 같은 서류를 2회 검증 (캐시 off, LLM 실호출 8건×2)",
+          size=13, bold=True, color=KB_GRAY, first=True, space_after=9)
+    _para(frame, "LLM이 쓴 설명 문구", size=11, color=MUTED, space_after=2)
+    _para(frame, "1회차 \"안정형(6등급만 가입 가능)이나 상품은 1등급…\"", size=10, color=INK, space_after=1)
+    _para(frame, "2회차 \"'안정형'(위험 감내도 최저)이나 위험등급은…\"", size=10, color=INK, space_after=6)
+    _para(frame, "→ 문구는 매번 달랐으나", size=11, color=MUTED, space_after=2)
+    _para(frame, "판정 8개는 완전히 동일", size=15, bold=True, color=OK, space_after=0)
+
+    # ── 7. 기술 선택 근거 ───────────────────────────────────
+    s = _slide(prs, "왜 이 구조인가", "다른 방식을 검토하고 배제한 근거", tag="기술 적정성")
+    _table(s, Inches(0.62), Inches(1.55), Inches(12.1), [
+        ["대안", "배제 이유", "근거"],
+        ["LLM이 판정까지 수행", "같은 입력에도 결과가 흔들려 감사·재현이 불가능",
+         "실측 — 같은 판정에도 설명 문구가 매번 달랐음"],
+        ["전용 모델 파인튜닝", "실제 판매서류는 개인정보라 학습 데이터 확보 불가. 규정 개정 시마다 재학습 필요",
+         "규정은 조문 텍스트로 관리하는 편이 갱신에 유리"],
+        ["RAG(법령 검색)만 구성", "조문은 찾아주지만 서류에서 값을 뽑아 문서 간 대조하지 못함",
+         "적합성 위반은 두 문서를 맞대야 성립"],
+        ["규칙만 사용 (LLM 없이)", "비정형 서류에서 문서유형·필드를 읽지 못함",
+         "실측 — 실물 22건에서 규칙 분류가 전부 확신 실패"],
+        ["채택: LLM 판독 + 규칙 판정 + 원문 대조",
+         "읽기는 LLM이 잘하고, 판정은 재현 가능해야 한다 — 역할을 분리",
+         "실물 24건 전수 감사 이상 0건"],
+    ], col_widths=[2.9, 5.4, 3.8], body_size=10)
+
+    _card(s, Inches(0.62), Inches(4.9), Inches(12.1), Inches(1.75),
+          "핵심 판단",
+          ["컴플라이언스 도구는 '정확도가 높은 모델'보다 '틀렸을 때 드러나는 구조'가 중요합니다.",
+           "LLM이 값을 잘못 읽으면 판정도 틀립니다 — 그래서 읽기와 판정 사이에 원문 대조 계층을 두었습니다.",
+           "실제로 LLM이 위험등급을 '5등급'으로 지어냈을 때(원문에는 6등급만 존재) 이 계층이 잡아냈습니다."],
+          accent=KB_YELLOW)
 
     # ── 6. 환각 차단 ────────────────────────────────────────
     s = _slide(prs, "핵심 기술 ①  AI가 지어낸 값을 판정에 쓰지 않는다",
@@ -413,6 +489,34 @@ def build() -> Path:
     _para(frame, "컴플라이언스 도구는 '다 잡아내는 것'보다 "
                  "'정상을 정상이라 말하는 것'이 도입 가능성을 좌우합니다.", size=12, color=INK)
 
+    # ── 한계와 대응 ─────────────────────────────────────────
+    s = _slide(prs, "한계와 대응", "검사하지 못하는 것을 검사한 척하지 않는다", tag="기술 실현 가능성")
+    _table(s, Inches(0.62), Inches(1.5), Inches(12.1), [
+        ["한계", "왜 생기는가", "현재 대응", "향후"],
+        ["녹취 음성을 판독하지 못함", "입력이 문서(PDF·이미지)로 한정",
+         "REC-001로 '녹취 의무 대상 여부'만 표시하고, 음성 미판독을 화면에 명시",
+         "본선: STT 연동해 낭독·동의 확인"],
+        ["금소법 6대 원칙 중 4개만 검사", "규칙을 실물로 검증하며 추가해 왔음",
+         "검사 범위(17·19·21·23·28조)를 화면에 명시",
+         "18·20·22조 규칙 추가"],
+        ["판정 매트릭스가 MVP 예시값", "실제 기준은 회사 내부 규정",
+         "정책을 코드에서 분리해 파라미터로 주입",
+         "KB 내부 적합성 기준으로 교체"],
+        ["문서유형 오분류 가능성", "실물 서류는 어휘가 섞여 규칙 분류가 확신하지 못함",
+         "규칙이 확신할 때만 LLM보다 우선 + 검토자가 화면에서 수동 교정",
+         "유형 판별 정확도 별도 측정"],
+        ["외부 LLM API에 서류를 전송", "비정형 판독에 필요",
+         "개인정보 미추출·마스킹 프롬프트·판독 캐시 즉시 삭제",
+         "사내망 LLM으로 대체 가능한 구조"],
+    ], col_widths=[2.5, 2.8, 4.2, 2.6], body_size=10)
+
+    frame = _textbox(s, Inches(0.62), Inches(5.75), Inches(12.1), Inches(1.1))
+    _para(frame, "한계를 감추면 도구를 신뢰할 수 없습니다.", size=15, bold=True, color=KB_GRAY,
+          first=True, space_after=7)
+    _para(frame, "이 시스템은 확인하지 못한 값을 '미확인'으로 드러내고, 검사하지 않는 조항을 화면에 밝힙니다. "
+                 "판정을 내리지 못하는 상황에서 그럴듯한 답을 내놓는 것이 컴플라이언스에서는 가장 위험합니다.",
+          size=13, color=INK)
+
     # ── 12. 개발 계획 ───────────────────────────────────────
     s = _slide(prs, "개발 계획", "예선 이후 본선까지의 구체적 로드맵", tag="개발 계획의 구체성")
     _table(s, Inches(0.62), Inches(1.5), Inches(12.1), [
@@ -496,8 +600,15 @@ def build() -> Path:
           size=13, color=INK)
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    prs.save(OUT)
-    return OUT
+    try:
+        prs.save(OUT)
+        return OUT
+    except PermissionError:
+        # 파워포인트로 열어둔 상태면 덮어쓸 수 없다. 옆에 새로 저장하고 알린다.
+        alt = OUT.with_name(f"{OUT.stem}_new{OUT.suffix}")
+        prs.save(alt)
+        print(f"⚠ {OUT} 를 열어둔 상태라 덮어쓰지 못했습니다. 닫은 뒤 다시 실행하세요.")
+        return alt
 
 
 if __name__ == "__main__":

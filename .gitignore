@@ -37,3 +37,6 @@ data/eval/
 
 # 실제 고객 서류(개인정보 — 절대 커밋 금지)
 data/realpkg/
+
+# Office 임시 잠금 파일
+~$*
