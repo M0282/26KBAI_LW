@@ -289,14 +289,29 @@ def process_package(files: list, slot: int):
     return documents, pdfs, raw_map, meta, failures
 
 
-def unread_in_demo_mode(files: list) -> list[str]:
-    """데모 모드에서 사전 판독 결과가 없는 파일 목록."""
-    return [f.name for f in files if load_result(f.getvalue()) is None]
-
 
 started_at = time.perf_counter()
 active_slots = [slot for slot, files in enumerate(uploaded_packages) if files]
 packages = []
+
+# 데모 모드에서 사전 판독 결과가 없는 서류는 값을 제대로 읽을 수 없다.
+# 조용히 부실한 판정을 내놓지 않도록, 검증을 진행하지 않고 이유를 밝힌다.
+if not has_key:
+    unknown = sorted({
+        f.name for files in uploaded_packages for f in files
+        if load_result(f.getvalue()) is None
+    })
+    if unknown:
+        listed = "\n".join(f"- {n}" for n in unknown)
+        st.error(
+            "**이 서류는 데모 모드에서 검증할 수 없습니다.**\n\n"
+            + listed
+            + "\n\n사전 판독 결과가 있는 서류는 `data/samples/demo/` 의 4종뿐입니다. "
+            "다른 서류를 검증하려면 **사이드바에 본인의 ANTHROPIC_API_KEY를 입력**하세요. "
+            "키 없이 진행하면 문서유형·위험등급 등을 읽지 못해 대부분의 항목이 "
+            "'미확인'으로 남고, 그 상태의 판정은 신뢰할 수 없습니다."
+        )
+        st.stop()
 
 progress = st.progress(0.0, text="서류를 판독하는 중…")
 for order, slot in enumerate(active_slots, start=1):
