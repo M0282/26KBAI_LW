@@ -185,7 +185,46 @@ def build() -> Path:
     _para(frame, "· 비대면 채널이 늘며 서류가 전자·통합 양식으로 다양해져, 사람이 형태별로 확인하는 부담이 커졌습니다.",
           size=13, color=INK)
 
-    # ── 3. 차별점 ───────────────────────────────────────────
+    # ── 3. 시장 근거 ────────────────────────────────────────
+    s = _slide(prs, "문제의 규모", "불완전판매 민원은 급증했고, 그 비용은 이미 판매사가 치르고 있다",
+               tag="문제 정의·필요성")
+    stats = [
+        ("11만 6,338건", "2024년 금융민원 총계", "전년 대비 +24%"),
+        ("+53.3%", "은행 권역 민원 증가", "24,043건 · ELS 불완전판매가 주원인"),
+        ("+1,048%", "펀드·방카슈랑스 민원 증가", "신탁은 +1,459%"),
+        ("약 1조 3,000억", "홍콩 ELS 자율배상 규모", "5개 은행 합계"),
+    ]
+    for i, (big, mid, small) in enumerate(stats):
+        box = s.shapes.add_shape(5, Inches(0.62 + i * 3.08), Inches(1.55), Inches(2.86), Inches(1.75))
+        box.fill.solid()
+        box.fill.fore_color.rgb = BG_SOFT
+        box.line.color.rgb = KB_YELLOW
+        frame = box.text_frame
+        frame.word_wrap = True
+        _para(frame, big, size=24, bold=True, color=RISK, first=True,
+              align=PP_ALIGN.CENTER, space_after=3)
+        _para(frame, mid, size=12, bold=True, color=KB_GRAY, align=PP_ALIGN.CENTER, space_after=2)
+        _para(frame, small, size=10, color=MUTED, align=PP_ALIGN.CENTER, space_after=0)
+
+    _card(s, Inches(0.62), Inches(3.6), Inches(5.9), Inches(2.35),
+          "이 문제는 KB국민은행이 직접 겪었습니다",
+          ["홍콩H지수 ELS 불완전판매로 금감원 검사 대상이 된 5개 은행:",
+           "KB국민 · 신한 · 하나 · NH농협 · SC제일",
+           "과징금은 최초 약 4조원으로 산정된 뒤 논의를 거쳐",
+           "6,000억원 수준으로 조정 (2026.7 기준 심의 진행)"], accent=RISK)
+    _card(s, Inches(6.75), Inches(3.6), Inches(5.97), Inches(2.35),
+          "제재 근거는 '판매 과정'입니다",
+          ["금소법 제57조 — 위반 관련 계약으로 얻은 수입의 50% 이내 과징금",
+           "즉 상품이 손실을 냈다는 사실이 아니라",
+           "적합성·설명의무를 지켰는지가 제재를 가른다",
+           "→ 판매 시점의 서류가 곧 방어 근거이자 위험 지점"], accent=KB_YELLOW)
+
+    frame = _textbox(s, Inches(0.62), Inches(6.1), Inches(12.1), Inches(0.9))
+    _para(frame, "출처: 금융감독원 2024년 금융민원 통계(2025.4 보도) · 홍콩 ELS 제재 관련 보도(2026.6~7). "
+                 "과징금 규모는 심의 진행에 따라 변동될 수 있습니다.",
+          size=10, color=MUTED, first=True, space_after=0)
+
+    # ── 4. 차별점 ───────────────────────────────────────────
     s = _slide(prs, "기존 접근과의 차별점", "역대 본선 진출작은 모두 '문서 하나' 또는 '규정↔규정'을 본다",
                tag="창의성·효과")
     _table(s, Inches(0.62), Inches(1.55), Inches(12.1), [
