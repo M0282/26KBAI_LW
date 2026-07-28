@@ -83,13 +83,9 @@ div[data-testid="stFileUploader"] {{ background:white; padding:10px; border-radi
 
 with st.sidebar:
     st.header("검증 설정")
-    typed_key = st.text_input(
-        "ANTHROPIC_API_KEY (선택)", type="password", placeholder="sk-ant-...",
-        help="입력하면 사전 판독 결과가 없는 서류도 검증할 수 있습니다. 저장되지 않습니다.",
-    )
-    if typed_key.strip():
-        os.environ["ANTHROPIC_API_KEY"] = typed_key.strip()
+    # 키는 .env 에서만 읽는다(화면에서 자격증명을 받지 않는다).
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    st.caption(f"LLM 판독: {'사용 가능 (.env 키 확인됨)' if has_key else '사용 불가 (.env에 키 없음)'}")
     live_law = st.toggle("국가법령정보 API 최신 원문 보강", value=bool(os.environ.get("LAW_API_OC")))
     st.divider()
     st.markdown("**인식하는 KB 서식**")
@@ -126,7 +122,8 @@ if not has_key:
     st.info(
         f"**데모 모드** — API 키가 없어 사전 판독 결과({DEMO_RESULTS}건)를 재생합니다. "
         "판정은 평소와 동일하게 규칙이 수행합니다. "
-        "다른 서류를 검증하려면 사이드바에 키를 입력하세요."
+        "다른 서류를 검증하려면 프로젝트 루트의 `.env` 파일에 "
+        "`ANTHROPIC_API_KEY` 를 넣고 다시 실행하세요."
     )
 
 st.markdown("#### 판매 건별 서류 업로드")
@@ -176,7 +173,8 @@ if not has_key:
         st.error(
             "**이 서류는 데모 모드에서 검증할 수 없습니다.**\n\n"
             + "\n".join(f"- {n}" for n in unknown)
-            + "\n\n사이드바에 본인의 ANTHROPIC_API_KEY를 입력하시면 검증할 수 있습니다."
+            + "\n\n프로젝트 루트의 `.env` 파일에 `ANTHROPIC_API_KEY` 를 넣고 "
+            "앱을 다시 실행하시면 검증할 수 있습니다."
         )
         st.stop()
 

@@ -77,15 +77,11 @@ div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radi
 
 with st.sidebar:
     st.header("검증 설정")
-    # 키를 화면에서 받는다 — .env 파일을 찾아 편집하지 않아도 되게.
-    # 세션에만 두고 저장하지 않는다.
-    typed_key = st.text_input(
-        "ANTHROPIC_API_KEY (선택)", type="password", placeholder="sk-ant-...",
-        help="입력하면 사전 판독 결과가 없는 서류도 검증할 수 있습니다. 저장되지 않습니다.",
-    )
-    if typed_key.strip():
-        os.environ["ANTHROPIC_API_KEY"] = typed_key.strip()
+    # 키는 .env 에서만 읽는다. 화면에서 받지 않는다 —
+    # 웹 폼에 자격증명을 입력받는 것은 보안상 권할 방식이 아니고,
+    # 실제 도입 환경에서도 키는 서버 설정으로 주입된다.
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    st.caption(f"LLM 판독: {'사용 가능 (.env 키 확인됨)' if has_key else '사용 불가 (.env에 키 없음)'}")
     # LLM을 끈 채로도 화면은 멀쩡히 뜨지만 판정은 전부 '미확인'이 된다(실측: 유효 판정 0건).
     # 조용히 틀린 결과를 보여주느니 아예 막는다.
     use_llm = st.toggle("LLM 문서 이해·쟁점 생성", value=has_key, disabled=not has_key)
@@ -121,17 +117,26 @@ with st.sidebar:
         removed = clear_llm_cache()
         st.success(f"캐시 {removed}건을 삭제했습니다.")
 
-if not has_key:
-    # 키가 없으면 업로드 자체를 막는다. 화면은 뜨지만 판정이 전부 '미확인'이 되는
-    # 상태로 시연하면 도구를 신뢰할 수 없다.
+DEMO_RESULTS = available_count()
+
+if not has_key and not DEMO_RESULTS:
+    # 키도 없고 사전 판독 결과도 없으면 판정이 전부 '미확인'이 된다.
+    # 조용히 틀린 결과를 보여주느니 중단한다.
     st.error(
-        "**ANTHROPIC_API_KEY가 설정되지 않아 검증을 시작할 수 없습니다.**\n\n"
-        "이 도구는 비정형 서류에서 판정에 필요한 값을 읽기 위해 LLM 판독이 필요합니다. "
-        "키 없이도 화면은 뜨지만 문서유형·필드를 신뢰할 수 있게 추출하지 못해 "
-        "모든 항목이 '미확인'으로 남습니다. 잘못된 판정을 내놓는 대신 중단합니다."
+        "**ANTHROPIC_API_KEY도, 사전 판독 결과도 없어 검증을 시작할 수 없습니다.**\n\n"
+        "이 도구는 비정형 서류에서 판정에 필요한 값을 읽기 위해 LLM 판독이 필요합니다."
     )
     st.code("프로젝트 루트의 .env 파일에\nANTHROPIC_API_KEY=sk-ant-...", language=None)
     st.stop()
+
+if not has_key:
+    # 데모 모드 — 사전에 판독해 둔 결과를 재생한다. 판정 로직은 평소와 동일하다.
+    st.info(
+        f"**데모 모드로 실행 중입니다** — API 키가 없어 사전에 판독해 둔 결과"
+        f"({DEMO_RESULTS}건)를 재생합니다.\n\n"
+        "`data/samples/demo/` 의 서류를 올리면 전체 검증 흐름을 그대로 확인할 수 있습니다. "
+        "**판정은 평소와 똑같이 규칙이 수행하므로 결과도 동일합니다.**"
+    )
 
 st.markdown("#### 판매서류 업로드")
 st.info(
@@ -307,7 +312,7 @@ if not has_key:
             "**이 서류는 데모 모드에서 검증할 수 없습니다.**\n\n"
             + listed
             + "\n\n사전 판독 결과가 있는 서류는 `data/samples/demo/` 의 4종뿐입니다. "
-            "다른 서류를 검증하려면 **사이드바에 본인의 ANTHROPIC_API_KEY를 입력**하세요. "
+            "다른 서류를 검증하려면 프로젝트 루트의 `.env` 파일에 `ANTHROPIC_API_KEY=sk-ant-...` 를 넣고 앱을 다시 실행하세요. "
             "키 없이 진행하면 문서유형·위험등급 등을 읽지 못해 대부분의 항목이 "
             "'미확인'으로 남고, 그 상태의 판정은 신뢰할 수 없습니다."
         )
