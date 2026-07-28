@@ -1,0 +1,42 @@
+{
+  "file_name": "02_간이투자설명서.pdf",
+  "doc_type": "product_description",
+  "fields": [
+    {
+      "name": "product_name",
+      "value": "KB 글로벌 배당주 증권 투자신탁(주식)",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "product_code",
+      "value": "KBGD-2026",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "product_risk_level",
+      "value": "2등급",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "principal_loss_explained",
+      "value": "확인",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "risk_level_explained",
+      "value": "확인",
+      "page": 1,
+      "confidence": 0.95
+    },
+    {
+      "name": "fees_explained",
+      "value": "확인",
+      "page": 1,
+      "confidence": 0.95
+    }
+  ]
+}
