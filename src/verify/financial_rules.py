@@ -47,7 +47,64 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
     ),
+    "ADV-001": RuleLawHint(
+        "투자성 상품 부당권유 금지 단정적 판단 원금보장 표현",
+        preferred_articles=("21",),
+        preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+    ),
+    "DOC-001": RuleLawHint(
+        "금융상품 판매 계약서류 제공의무 기록 유지 관리",
+        preferred_articles=("23",),
+        preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+    ),
+    "REC-001": RuleLawHint(
+        # 녹취 의무의 직접 근거는 자본시장법 시행령·금융투자업규정이라 현재 코퍼스에 없다.
+        # 가장 근접한 금소법 28조(자료의 기록 및 유지·관리)를 근거로 제시한다.
+        "금융상품 판매 과정 자료의 기록 유지 관리 고령투자자 보호",
+        preferred_articles=("28",),
+        preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+    ),
 }
+
+# 금소법 21조: 투자성 상품에 '손실이 없다'는 단정적 판단을 제공하는 것은 금지된다.
+# 다만 실물 서류에는 같은 낱말이 정반대 맥락으로 흔하게 등장한다(실측):
+#   - "원금이 보장되지 않으며 전부 손실될 수 있습니다"  → 올바른 고지
+#   - "원금보장추구형 구조화 상품"                      → 상품 유형 명칭
+# 그래서 낱말만 보면 오탐 100%다. 부정 표현과 유형 명칭을 먼저 걷어낸다.
+_GUARANTEE_CLAIMS = (
+    r"원금[이은을]?보장",
+    r"원금[이은을]?보전",
+    r"확정수익",
+    r"수익[을이]?보장",
+    r"손실[이은]?없",
+    r"절대안전",
+    r"반드시수익",
+)
+# 뒤에 이런 표현이 붙으면 위반이 아니다(부정 고지 또는 상품 유형명).
+# '여'는 사실상 언제나 '여부'(원금보장 여부)다 — 중립적 질의 표현이지 보장 약속이 아니다.
+# 머리글이 낱말 사이에 끼어 '여부'가 쪼개지는 실물 사례가 있어 '여'만으로도 인정한다.
+_CLAIM_EXCEPTIONS = (
+    "되지", "되지않", "않", "아닙", "아니", "없는", "불가", "추구", "형", "여", "제외",
+)
+_EXCEPTION_WINDOW = 12  # 표현 직후 이 글자 수 안에 예외어가 있으면 정상으로 본다
+
+
+_PAGE_ARTIFACT = re.compile(r"-\s*\d{1,4}\s*-")  # 쪽번호가 낱말 중간에 끼어든다
+
+
+def find_guarantee_claims(text: str) -> list[str]:
+    """부당권유 소지가 있는 단정적 표현을 찾는다(부정 고지·유형명은 제외)."""
+    # 실측: "원금보장여-168-부와 관계없이"처럼 쪽번호가 낱말을 쪼개 예외 판정을 방해한다.
+    compact = re.sub(r"\s+", "", _PAGE_ARTIFACT.sub("", text))
+    found: list[str] = []
+    for pattern in _GUARANTEE_CLAIMS:
+        for match in re.finditer(pattern, compact):
+            tail = compact[match.end() : match.end() + _EXCEPTION_WINDOW]
+            if any(token in tail for token in _CLAIM_EXCEPTIONS):
+                continue  # "원금보장되지 않습니다" / "원금보장추구형" → 정상
+            start = max(0, match.start() - 20)
+            found.append(compact[start : match.end() + 20])
+    return found
 
 # 숫자가 작을수록 위험도가 높다. 값은 대회 MVP용 예시이며 실제 은행 정책으로 교체한다.
 DEFAULT_PROFILE_MIN_ALLOWED_GRADE = {
@@ -249,6 +306,165 @@ def check_explanations(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
+# 21조는 '판매자가 고객에게 한 표현'을 규율한다. 적합성 진단표의 투자목적은
+# 고객이 원하는 바를 적은 것이라(실측: "투자목적: 원금보전 및 예금수준 안정수익")
+# 검사 대상이 아니다.
+_ADVICE_DOC_TYPES = ("product_description", "application", "acknowledgement")
+
+
+def check_unfair_solicitation(documents: list[ParsedDocument]) -> RuleCheck:
+    """부당권유 금지 — 원금보장·확정수익 등 단정적 표현이 있는지(금소법 21조)."""
+    targets = [d for d in documents if d.doc_type in _ADVICE_DOC_TYPES]
+    if not targets:
+        return RuleCheck(
+            rule_id="ADV-001",
+            description="부당권유 금지 표현 검사",
+            status=CheckStatus.WARNING,
+            document_excerpt="검사할 판매 서류가 없습니다.",
+            suggestion="상품설명서·가입신청서를 업로드하세요.",
+        )
+    hits = [
+        (document.document_id, claim)
+        for document in sorted(targets, key=lambda d: d.document_id)
+        for claim in find_guarantee_claims(document.raw_text)
+    ]
+    if hits:
+        return RuleCheck(
+            rule_id="ADV-001",
+            description="부당권유 금지 표현 검사",
+            status=CheckStatus.RISK,
+            document_excerpt=" / ".join(f"{name}: …{claim}…" for name, claim in hits[:3]),
+            suggestion="원금·수익을 보장하는 단정적 표현은 투자성 상품에 사용할 수 없습니다. "
+            "해당 문구의 사용 경위와 정정 여부를 확인하세요.",
+        )
+    return RuleCheck(
+        rule_id="ADV-001",
+        description="부당권유 금지 표현 검사",
+        status=CheckStatus.PASS,
+        document_excerpt=f"판매 서류 {len(targets)}건에서 원금보장·확정수익 등 단정적 표현 없음",
+    )
+
+
+# 판매 시 갖춰야 할 서류 4종. 하나라도 없으면 교차 검증 자체가 불완전해진다.
+REQUIRED_DOC_TYPES = ("suitability_form", "product_description", "application", "acknowledgement")
+REQUIRED_DOC_LABELS = {
+    "suitability_form": "적합성 진단표",
+    "product_description": "상품설명서",
+    "application": "가입신청서",
+    "acknowledgement": "설명 확인서",
+}
+
+
+# 비대면(모바일) 판매에서는 설명확인서가 별도 파일로 존재하지 않고 가입신청서 안의
+# 확인 문구 + 전자서명으로 대체된다. 실측 — 집합투자증권 계약서에 다음이 들어 있다:
+#   "위 계약내용에 대해 모두 확인하였으며, 주요내용을 충분히 설명듣고 이해하였습니다"
+# 이때 별도 서류가 없다는 이유로 '누락'을 내면 ACK-001(고객확인 확인됨)과 모순된다.
+_ACK_SUBSTITUTE_PHRASES = (
+    "설명듣고이해", "설명을듣고이해", "설명을이해", "충분히설명", "설명을들었",
+    "이해하였습니다", "인지하였습니다",
+)
+
+
+def _is_negative_ack(value: str) -> bool:
+    """서류가 '확인받지 못했다'고 적은 표현인지(미서명 / 없음 / 미확인 …)."""
+    return any(
+        token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
+    )
+
+
+def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
+    """설명확인 증빙이 다른 서류에 통합돼 있는지(확인 문구 + 고객 확인값)."""
+    values = [v for _, v in _documents_with(documents, "customer_acknowledgement")]
+    confirmed = any(v and not _is_negative_ack(v) for v in values)
+    if not confirmed:
+        return False
+    return any(
+        any(p in re.sub(r"\s+", "", d.raw_text) for p in _ACK_SUBSTITUTE_PHRASES)
+        for d in documents
+    )
+
+
+def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
+    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조)."""
+    present = {d.doc_type for d in documents}
+    missing = [t for t in REQUIRED_DOC_TYPES if t not in present]
+    if not missing:
+        return RuleCheck(
+            rule_id="DOC-001",
+            description="판매서류 4종 구비 여부",
+            status=CheckStatus.PASS,
+            document_excerpt="적합성 진단표·상품설명서·가입신청서·설명 확인서 모두 확인",
+        )
+    # 설명확인서만 없고 그 내용이 다른 서류에 통합돼 있으면 비대면 판매의 정상 형태다.
+    # 서류 자체는 계속 요구하되(회사는 전자문서로 보유해야 한다) 위반이 아닌 확인 사항으로 낮춘다.
+    if missing == ["acknowledgement"] and has_embedded_acknowledgement(documents):
+        return RuleCheck(
+            rule_id="DOC-001",
+            description="판매서류 4종 구비 여부",
+            status=CheckStatus.WARNING,
+            document_excerpt="설명 확인서가 별도 파일로 없으나, 다른 서류에 설명확인 문구와 고객 확인이 포함됨",
+            suggestion="비대면 판매의 전자적 확인(체크 동의·전자서명)으로 보입니다. "
+            "전자문서함에 보관된 설명확인 기록을 함께 확인하세요.",
+        )
+    labels = ", ".join(REQUIRED_DOC_LABELS[t] for t in missing)
+    return RuleCheck(
+        rule_id="DOC-001",
+        description="판매서류 4종 구비 여부",
+        status=CheckStatus.MISSING,
+        document_excerpt=f"누락 서류: {labels}",
+        suggestion=f"{labels}를 업로드하세요. 서류가 빠지면 해당 항목은 검증할 수 없습니다. "
+        "비대면 판매라면 전자문서함·이메일로 교부된 파일을 내려받아 올리세요.",
+    )
+
+
+# 녹취 의무 대상이 되는 고위험 등급(1~2등급). 실제 기준은 상품 종류(파생결합증권 등)와
+# 회사 내부 기준을 함께 보지만, 서류에서 확실히 읽히는 값은 위험등급이라 이를 기준으로 삼는다.
+RECORDING_RISK_GRADES = (1, 2)
+
+
+def check_recording_requirement(
+    documents: list[ParsedDocument], elderly_investor: bool = False
+) -> RuleCheck:
+    """녹취 의무 대상 여부를 표시한다.
+
+    이 도구는 오디오를 판독하지 않으므로 녹취가 실제로 있었는지는 **확인하지 못한다**.
+    대신 '녹취가 필요한 판매 건인지'를 서류에서 판단해 담당자가 놓치지 않게 한다.
+    고위험 상품·고령투자자·부적합 판매는 서류 서명만으로는 요건을 갖추지 못한다.
+
+    elderly_investor: 만 65세 이상 여부. 우리는 개인정보(생년월일)를 추출하지 않으므로
+        화면에서 검토자가 입력한다.
+    """
+    risks = _documents_with(documents, "product_risk_level")
+    grades = [g for _, value in risks if (g := _risk_number(value)) is not None]
+    high_risk = [g for g in grades if g in RECORDING_RISK_GRADES]
+    unsuitable = check_suitability(documents).status is CheckStatus.RISK
+
+    reasons: list[str] = []
+    if high_risk:
+        reasons.append(f"고위험 상품({min(high_risk)}등급)")
+    if elderly_investor:
+        reasons.append("고령투자자(만 65세 이상)")
+    if unsuitable:
+        reasons.append("투자성향 부적합 상품 판매")
+
+    if not reasons:
+        return RuleCheck(
+            rule_id="REC-001",
+            description="판매 과정 녹취 의무 대상 여부",
+            status=CheckStatus.PASS,
+            document_excerpt="녹취 의무 대상 요건에 해당하지 않습니다"
+            + (f" (위험등급 {min(grades)}등급)" if grades else ""),
+        )
+    return RuleCheck(
+        rule_id="REC-001",
+        description="판매 과정 녹취 의무 대상 여부",
+        status=CheckStatus.WARNING,
+        document_excerpt="녹취 의무 대상일 수 있음 — " + ", ".join(reasons),
+        suggestion="이 도구는 음성 파일을 판독하지 않습니다. "
+        "해당 판매 건의 녹취 기록이 실제로 보관돼 있는지 별도로 확인하세요.",
+    )
+
+
 def check_explanation(document: ParsedDocument) -> RuleCheck:
     values = field_map(document)
     semantic = {
@@ -335,12 +551,7 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
         )
     # 확인값이 여러 건이면 첫 값이 아니라 **부정 증빙을 우선**한다.
     # 한 서류라도 미서명이면 패키지 전체가 위험이다(순서로 결과가 갈리면 안 된다).
-    def _is_negative(value: str) -> bool:
-        return any(
-            token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
-        )
-
-    negatives = [v for _, v in acknowledgements if _is_negative(v)]
+    negatives = [v for _, v in acknowledgements if _is_negative_ack(v)]
     value = negatives[0] if negatives else acknowledgements[0][1]
     negative = bool(negatives)
     if negative:
@@ -364,6 +575,7 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
 def run_package_checks(
     documents: list[ParsedDocument],
     profile_min_grade: dict[str, int] | None = None,
+    elderly_investor: bool = False,
 ) -> list[RuleCheck]:
     # profile_min_grade: 적합성 등급 매트릭스(규정 파라미터). 개정 시 이 값을 바꿔
     # 재검증하면 판정 변화를 확인할 수 있다(규정 개정 재검증). 기본은 현행 매트릭스.
@@ -375,4 +587,7 @@ def run_package_checks(
     ]
     product_documents = [document for document in documents if document.doc_type == "product_description"]
     checks.append(check_explanations(documents))
+    checks.append(check_unfair_solicitation(documents))
+    checks.append(check_document_set(documents))
+    checks.append(check_recording_requirement(documents, elderly_investor=elderly_investor))
     return checks
