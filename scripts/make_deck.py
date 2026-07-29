@@ -23,6 +23,9 @@ from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
 OUT = Path("docs/기술설명서_초안.pptx")
+SHOTS = Path("docs/screens")
+# 캡처 원본은 3200x2400(사이드바 포함). 슬라이드에는 본문만 크게 싣는다.
+SIDEBAR_FRACTION = 0.19
 
 KB_YELLOW = RGBColor(0xFC, 0xAF, 0x17)
 KB_GRAY = RGBColor(0x64, 0x5B, 0x4C)
@@ -117,6 +120,35 @@ def _table(slide, left, top, width, rows, *, col_widths=None, head_size=12, body
             cell.fill.solid()
             cell.fill.fore_color.rgb = BG_SOFT if r == 0 else RGBColor(0xFF, 0xFF, 0xFF)
     return table
+
+
+def _shot(slide, left, top, width, height, name, label, *, keep_sidebar=False, focus=0.0):
+    """실제 캡처 화면을 넣는다. 파일이 없으면 자리표시자로 대체한다.
+
+    캡처는 4:3인데 슬라이드 자리는 가로로 길다. 이미지를 늘이면 글자가 뭉개지므로
+    비율을 지킨 채 잘라 넣는다(python-pptx의 crop_*는 원본 대비 비율).
+    focus: 0이면 위쪽, 1이면 아래쪽을 남긴다.
+    """
+    path = SHOTS / name
+    if not path.exists():
+        _placeholder(slide, left, top, width, height, f"{label}\n(캡처 없음 — py -3.12 -m scripts.capture_screens)")
+        return None
+
+    picture = slide.shapes.add_picture(str(path), left, top, width=width, height=height)
+    crop_left = 0.0 if keep_sidebar else SIDEBAR_FRACTION
+    native_ratio = (picture.image.size[0] * (1 - crop_left)) / picture.image.size[1]
+    target_ratio = width / height
+    # 남길 세로 비율 = 가로 비율 / 목표 비율. 1을 넘으면 자를 것이 없다.
+    keep = min(1.0, native_ratio / target_ratio)
+    drop = 1.0 - keep
+    picture.crop_left = crop_left
+    picture.crop_top = drop * focus
+    picture.crop_bottom = drop * (1 - focus)
+
+    frame_box = slide.shapes.add_shape(5, left, top, width, height)
+    frame_box.fill.background()
+    frame_box.line.color.rgb = LINE
+    return picture
 
 
 def _placeholder(slide, left, top, width, height, label):
@@ -585,10 +617,10 @@ def build() -> Path:
         ["REC-001 녹취", "주의 (고위험·부적합)", "통과"],
     ], col_widths=[1.9, 2.3, 1.8], body_size=10)
 
-    _placeholder(s, Inches(6.95), Inches(1.5), Inches(5.77), Inches(2.6),
-                 "[스크린샷] 판정 요약 화면\n(위험 3건 적발 · 종합 결론 배지)")
-    _placeholder(s, Inches(6.95), Inches(4.25), Inches(5.77), Inches(2.4),
-                 "[스크린샷] 근거 조문 + 서류 원문 하이라이트")
+    _shot(s, Inches(6.95), Inches(1.5), Inches(5.77), Inches(2.6),
+          "01_판정요약.png", "[스크린샷] 판정 요약 화면")
+    _shot(s, Inches(6.95), Inches(4.15), Inches(5.77), Inches(2.6),
+          "04_하이라이트.png", "[스크린샷] 서류 원문 하이라이트", focus=0.09)
 
     frame = _textbox(s, Inches(0.62), Inches(4.35), Inches(6.0), Inches(2.3))
     _para(frame, "오탐을 내지 않는 것이 핵심입니다", size=15, bold=True, color=KB_GRAY,
@@ -597,6 +629,22 @@ def build() -> Path:
                  "위반을 심은 건만 정확히 잡습니다.", size=12, color=INK, space_after=6)
     _para(frame, "컴플라이언스 도구는 '다 잡아내는 것'보다 "
                  "'정상을 정상이라 말하는 것'이 도입 가능성을 좌우합니다.", size=12, color=INK)
+
+    # ── 11-2. 실제 화면: 근거 조문 ──────────────────────────
+    s = _slide(prs, "실제 화면 — 판정마다 법령 원문이 따라붙는다",
+               "판정만 주는 도구는 담당자가 다시 규정을 찾아봐야 한다", tag="창의성·효과")
+    _shot(s, Inches(0.62), Inches(1.5), Inches(8.3), Inches(4.4),
+          "02_근거조문.png", "[스크린샷] 근거 조문 제시 화면", focus=0.05)
+    _card(s, Inches(9.15), Inches(1.5), Inches(3.57), Inches(4.4),
+          "이 화면이 말하는 것",
+          ["규칙마다 근거 조문을 미리 지정 — 검색 점수가 높다고 엉뚱한 조문이 앞서지 않는다",
+           "조문 원문을 그 자리에서 펼쳐 확인",
+           "출처 표기(local · law.go.kr)로 최신 원문 보강 여부를 구분",
+           "이 결과가 내보내기 파일에도 같이 담긴다"], accent=KB_YELLOW)
+    frame = _textbox(s, Inches(0.62), Inches(6.05), Inches(12.1), Inches(0.9))
+    _para(frame, "녹취 의무(REC-001) 판정에 금융소비자보호법 제28조(자료의 기록 및 유지·관리)가 "
+                 "최우선 근거로 붙습니다 — 담당자는 화면을 벗어나지 않고 조문을 확인합니다.",
+          size=12, color=INK, first=True)
 
     # ── 한계와 대응 ─────────────────────────────────────────
     s = _slide(prs, "한계와 대응", "검사하지 못하는 것을 검사한 척하지 않는다", tag="기술 실현 가능성")

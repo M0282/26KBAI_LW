@@ -63,28 +63,35 @@ def search_chunks(
     source_set = {str(value) for value in preferred_sources}
     results: list[LawSearchResult] = []
 
+    preferred: list[LawSearchResult] = []
+
     for chunk, base_score in zip(corpus, scores):
         source = str(chunk.get("source", ""))
         article_no = str(chunk.get("article_no", ""))
         score = base_score
-        if article_no in article_set:
-            score += 5.0
         if source in source_set:
             score += 2.5
-        if score <= 0:
-            continue
-        results.append(
-            LawSearchResult(
-                source=source,
-                source_type=str(chunk.get("source_type", "")),
-                article_no=article_no,
-                title=str(chunk.get("title", "")),
-                text=str(chunk.get("text", "")),
-                score=score,
-                origin=origin,
-            )
+        result = LawSearchResult(
+            source=source,
+            source_type=str(chunk.get("source_type", "")),
+            article_no=article_no,
+            title=str(chunk.get("title", "")),
+            text=str(chunk.get("text", "")),
+            score=score,
+            origin=origin,
         )
-    return sorted(results, key=lambda item: item.score, reverse=True)[:top_k]
+        # 규칙마다 근거 조문을 손으로 매핑해 두었다. 그 조문은 점수와 무관하게 먼저 보여준다.
+        # 가산점 방식으로는 BM25 점수가 높은 다른 조문에 밀린다 — 실측: 녹취 의무(REC-001)의
+        # 최우선 근거로 28조(자료의 기록) 대신 18조(적정성원칙)가 표시됐다.
+        # 출처까지 지정됐다면 그 출처의 조문만 우선한다(같은 조 번호가 여러 법령에 있다).
+        if article_no in article_set and (not source_set or source in source_set):
+            preferred.append(result)
+        elif score > 0:
+            results.append(result)
+
+    preferred.sort(key=lambda item: item.score, reverse=True)
+    results.sort(key=lambda item: item.score, reverse=True)
+    return (preferred + results)[:top_k]
 
 
 def search_local_laws(
@@ -172,4 +179,10 @@ def find_legal_basis(
         preferred_sources=preferred_sources,
         top_k=top_k,
     )
-    return _deduplicate([*live, *local], top_k=top_k)
+    merged = _deduplicate([*live, *local], top_k=top_k * 2)
+    # 라이브 결과를 앞에 붙이면 큐레이션한 근거 조문이 밀린다(실측: 녹취 의무의
+    # 최우선 근거가 28조 대신 18조로 표시됨). 병합 후에도 지정 조문을 먼저 둔다.
+    article_set = {str(value) for value in preferred_articles}
+    if article_set:
+        merged.sort(key=lambda item: item.article_no not in article_set)
+    return merged[:top_k]
