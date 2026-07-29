@@ -45,9 +45,16 @@ def _paths(argv: list[str]) -> list[Path]:
     for arg in iterator:
         if arg == "--dir":
             target = next(iterator, "")
-            paths += [Path(p) for p in glob.glob(f"{target}/*")]
+            paths += [Path(p) for p in glob.glob(f"{glob.escape(target)}/*")]
         elif not arg.startswith("--"):
-            paths += [Path(p) for p in glob.glob(arg)]
+            # 실재하는 경로는 glob을 거치지 않는다.
+            # '핵심[요약] 상품설명서.pdf'처럼 대괄호가 든 파일명을 glob은 문자 클래스로
+            # 해석해 조용히 건너뛴다(실측: 25건 중 2건 누락).
+            direct = Path(arg)
+            if direct.exists():
+                paths.append(direct)
+            else:
+                paths += [Path(p) for p in glob.glob(arg)]
     return sorted({p for p in paths if p.suffix.lower() in SUPPORTED})
 
 

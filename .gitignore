@@ -14,6 +14,9 @@ venv/
 # 데이터 (샘플 소량만 data/samples/ 에 커밋 허용)
 data/regulations/*
 !data/regulations/.gitkeep
+# 조문 청크는 커밋한다(0.64MB) — 제출본에서 근거 조문 검색이 동작해야 한다.
+# 원본 API 응답(*.raw.json, 1.6MB)은 재수집용이라 제외한다.
+!data/regulations/*.articles.json
 *.db
 chroma/
 
@@ -31,8 +34,7 @@ Thumbs.db
 
 # 데모 생성물(스크립트로 재현)
 # data/samples/demo/ 는 커밋한다 — 가상 고객(김국민) 서류 4종, 총 277KB.
-# 제출본을 받은 사람이 사전 판독 결과(data/demo_results/)로 시연하려면
-# 우리가 해시한 바로 그 파일이 필요하다(재생성하면 바이트가 달라진다).
+# 위반 3건을 심어둔 시연 시나리오라 제출본에 포함되어야 한다.
 
 # 실물 검증용 PDF (다운로드물)
 data/eval/

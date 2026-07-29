@@ -20,7 +20,6 @@ if str(ROOT) not in sys.path:
 # (스캔 이미지가 OCR 오독 그대로 판정되는 원인이었음) — 실제 환경변수가 우선.
 load_dotenv(ROOT / ".env", override=False)
 
-from src.common.demo_store import available_count, load_result
 from src.common.llm_cache import clear_llm_cache
 from src.common.schemas import CheckStatus, ParsedDocument
 from src.ingest.law_search import find_legal_basis
@@ -77,14 +76,6 @@ div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radi
 
 with st.sidebar:
     st.header("검증 설정")
-    # 키를 화면에서 받는다 — .env 파일을 찾아 편집하지 않아도 되게.
-    # 세션에만 두고 저장하지 않는다.
-    typed_key = st.text_input(
-        "ANTHROPIC_API_KEY (선택)", type="password", placeholder="sk-ant-...",
-        help="입력하면 사전 판독 결과가 없는 서류도 검증할 수 있습니다. 저장되지 않습니다.",
-    )
-    if typed_key.strip():
-        os.environ["ANTHROPIC_API_KEY"] = typed_key.strip()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     # LLM을 끈 채로도 화면은 멀쩡히 뜨지만 판정은 전부 '미확인'이 된다(실측: 유효 판정 0건).
     # 조용히 틀린 결과를 보여주느니 아예 막는다.
@@ -201,11 +192,6 @@ def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_ty
     """
     pdf = load_pdf(raw_bytes, document_id=file_name)
     parsed = to_parsed_document(pdf)
-    if not with_llm:
-        # 키가 없으면 사전 판독 결과를 재생한다(좌표·하이라이트는 로컬 파싱으로 얻는다).
-        stored = load_result(raw_bytes)
-        if stored is not None:
-            return pdf, parsed.raw_text, stored
     result = extract_document(
         parsed, use_llm=with_llm, locator=pdf.locate, page_renderer=pdf.render_page,
         force_doc_type=forced_type,
@@ -287,11 +273,6 @@ def process_package(files: list, slot: int):
             hint = READ_ERROR_HINTS.get(type(exc).__name__, "")
             failures.append(f"{name}: {hint or f'{type(exc).__name__} - {exc}'}")
     return documents, pdfs, raw_map, meta, failures
-
-
-def unread_in_demo_mode(files: list) -> list[str]:
-    """데모 모드에서 사전 판독 결과가 없는 파일 목록."""
-    return [f.name for f in files if load_result(f.getvalue()) is None]
 
 
 started_at = time.perf_counter()
