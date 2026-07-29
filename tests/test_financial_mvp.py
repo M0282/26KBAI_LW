@@ -105,3 +105,25 @@ def test_drop_heading_echo_keeps_article_that_is_only_a_heading():
     from src.ingest.articles import drop_heading_echo
 
     assert drop_heading_echo(["제6조(삭제)"]) == ["제6조(삭제)"]
+
+
+def test_repealed_articles_are_never_offered_as_legal_basis():
+    """폐지된 조문을 근거로 내놓으면 그 판정은 통째로 틀린다."""
+    from src.ingest.law_search import is_repealed
+
+    chunks = [
+        {"source": "은행업감독규정", "source_type": "admrule", "article_no": "16",
+         "title": "", "text": "제16조 삭제 <2016.7.28>"},
+        {"source": "은행업감독규정", "source_type": "admrule", "article_no": "17",
+         "title": "리스크관리", "text": "제17조(리스크관리조직) 삭제 <2014.11.1>"},
+        {"source": "은행업감독규정", "source_type": "admrule", "article_no": "18",
+         "title": "경영지도기준", "text": "은행은 경영지도기준을 준수하여야 한다. 삭제된 조항을 참고한다."},
+    ]
+    assert is_repealed(chunks[0]) is True
+    assert is_repealed(chunks[1]) is True
+    # 본문에 '삭제'라는 낱말이 들어 있을 뿐인 살아 있는 조문은 남아야 한다.
+    assert is_repealed(chunks[2]) is False
+
+    results = search_local_laws("삭제된 조항 경영지도기준", chunks=chunks, top_k=5)
+    assert all(not r.text.strip().endswith("삭제") for r in results)
+    assert {r.article_no for r in results} <= {"18"}

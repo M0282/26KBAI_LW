@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -49,6 +50,18 @@ def _score_chunks(query: str, corpus: list[dict]) -> list[float]:
     return bm25_scores(query, texts)
 
 
+# "제16조 삭제 <2016.7.28>" 처럼 본문이 폐지 표시뿐인 조문.
+# 제목이 붙는 형태("제N조(리스크관리조직) 삭제")도 있다.
+_REPEALED = re.compile(
+    r"^(?:제\d+조(?:의\d+)?)?\s*(?:\([^)]*\))?\s*삭제\s*(?:<[^>]*>)?\s*$"
+)
+
+
+def is_repealed(chunk: dict) -> bool:
+    """폐지된 조문인지. 폐지 조문을 근거로 제시하면 그 판정은 통째로 틀린다."""
+    return bool(_REPEALED.fullmatch((chunk.get("text") or "").strip()))
+
+
 def search_chunks(
     query: str,
     chunks: Iterable[dict],
@@ -57,7 +70,11 @@ def search_chunks(
     top_k: int = 5,
     origin: str = "local",
 ) -> list[LawSearchResult]:
-    corpus = list(chunks)
+    # 폐지된 조문은 근거가 될 수 없으므로 후보에서 아예 뺀다.
+    # 실행 중 검색어는 LLM이 자유 형식으로 만들기 때문에, 규칙에 박아 둔 질의로만
+    # 확인해서는 안전하다고 할 수 없다 — 실제로 '삭제된 조항' 질의에서
+    # 은행업감독규정 제16조(삭제)가 상위 5건에 들어왔다.
+    corpus = [chunk for chunk in chunks if not is_repealed(chunk)]
     scores = _score_chunks(query, corpus)
     article_set = {str(value) for value in preferred_articles}
     source_set = {str(value) for value in preferred_sources}
