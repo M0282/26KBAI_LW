@@ -92,12 +92,31 @@ def _package_without_ack(ack_value: str | None, contract_text: str):
     return docs
 
 
-def test_integrated_acknowledgement_is_warning_not_missing():
+def test_integrated_acknowledgement_is_warning_when_marked_non_face_to_face():
+    """비대면으로 표시된 건에서만 통합 양식을 인정한다."""
     from src.parser.financial_extractor import SIGNED
 
-    check = check_document_set(_package_without_ack(SIGNED, INTEGRATED_CONTRACT))
+    check = check_document_set(
+        _package_without_ack(SIGNED, INTEGRATED_CONTRACT), non_face_to_face=True
+    )
     assert check.status is CheckStatus.WARNING
     assert "별도 파일로 없으나" in check.document_excerpt
+
+
+def test_offline_sale_missing_acknowledgement_is_not_excused():
+    """영업점 판매에서 설명확인서를 받지 않았다면 계약서 문구가 있어도 누락이다.
+
+    계약서에는 확인 문구가 인쇄돼 있는 경우가 많다(실물 집합투자증권 계약서에
+    '충분히 설명듣고 이해하였습니다'가 들어 있다). 채널을 모른 채 문구만 보고
+    완화하면, 대면 판매의 진짜 누락이 '주의'로 가려진다.
+    """
+    from src.parser.financial_extractor import SIGNED
+
+    check = check_document_set(
+        _package_without_ack(SIGNED, INTEGRATED_CONTRACT), non_face_to_face=False
+    )
+    assert check.status is CheckStatus.MISSING
+    assert "설명 확인서" in check.document_excerpt
 
 
 def test_truly_missing_acknowledgement_stays_missing():
@@ -111,7 +130,9 @@ def test_unsigned_integrated_form_is_not_excused():
     """확인 문구가 있어도 고객이 서명하지 않았으면 면제되지 않는다."""
     from src.parser.financial_extractor import UNSIGNED
 
-    check = check_document_set(_package_without_ack(UNSIGNED, INTEGRATED_CONTRACT))
+    check = check_document_set(
+        _package_without_ack(UNSIGNED, INTEGRATED_CONTRACT), non_face_to_face=True
+    )
     assert check.status is CheckStatus.MISSING
 
 
@@ -215,7 +236,7 @@ def test_ack_and_doc_rules_agree_on_the_same_value():
               product_name="KB 펀드", contract_date="2026-07-20",
               customer_acknowledgement="이의 없음 확인 서명", staff_name="이판매"),
     ]
-    checks = {c.rule_id: c for c in run_package_checks(documents)}
+    checks = {c.rule_id: c for c in run_package_checks(documents, non_face_to_face=True)}
     assert checks["ACK-001"].status == CheckStatus.PASS
     assert checks["DOC-001"].status == CheckStatus.WARNING
 

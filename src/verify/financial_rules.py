@@ -401,8 +401,19 @@ def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
     )
 
 
-def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
-    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조)."""
+def check_document_set(
+    documents: list[ParsedDocument], non_face_to_face: bool = False
+) -> RuleCheck:
+    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조).
+
+    non_face_to_face: 비대면(모바일·인터넷) 가입 여부. 비대면에서는 설명확인서가
+        별도 파일로 존재하지 않고 계약서의 확인 문구 + 전자서명이 그 역할을 한다.
+        판매 채널은 서류에서 읽히지 않으므로 검토자가 표시한다(고령 여부와 같다).
+
+        예전에는 이 인자가 없어서, 서류에 확인 문구만 있으면 채널과 무관하게
+        '주의'로 낮췄다. 그러면 영업점에서 설명확인서를 실제로 빠뜨린 건도
+        계약서에 인쇄된 문구 때문에 누락으로 드러나지 않는다.
+    """
     present = {d.doc_type for d in documents}
     missing = [t for t in REQUIRED_DOC_TYPES if t not in present]
     if not missing:
@@ -414,7 +425,13 @@ def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
         )
     # 설명확인서만 없고 그 내용이 다른 서류에 통합돼 있으면 비대면 판매의 정상 형태다.
     # 서류 자체는 계속 요구하되(회사는 전자문서로 보유해야 한다) 위반이 아닌 확인 사항으로 낮춘다.
-    if missing == ["acknowledgement"] and has_embedded_acknowledgement(documents):
+    # 대면 판매로 표시된 건에는 이 완화를 적용하지 않는다 — 영업점에서 설명확인서를
+    # 받지 않았다면 그건 통합 양식이 아니라 진짜 누락이다.
+    if (
+        non_face_to_face
+        and missing == ["acknowledgement"]
+        and has_embedded_acknowledgement(documents)
+    ):
         return RuleCheck(
             rule_id="DOC-001",
             description="판매서류 4종 구비 여부",
@@ -601,6 +618,7 @@ def run_package_checks(
     documents: list[ParsedDocument],
     profile_min_grade: dict[str, int] | None = None,
     elderly_investor: bool = False,
+    non_face_to_face: bool = False,
 ) -> list[RuleCheck]:
     # profile_min_grade: 적합성 등급 매트릭스(규정 파라미터). 개정 시 이 값을 바꿔
     # 재검증하면 판정 변화를 확인할 수 있다(규정 개정 재검증). 기본은 현행 매트릭스.
@@ -612,7 +630,7 @@ def run_package_checks(
     ]
     checks.append(check_explanations(documents))
     checks.append(check_unfair_solicitation(documents))
-    checks.append(check_document_set(documents))
+    checks.append(check_document_set(documents, non_face_to_face=non_face_to_face))
     checks.append(
         check_recording_requirement(
             documents,
