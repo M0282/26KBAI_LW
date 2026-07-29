@@ -250,3 +250,27 @@ def test_recording_rule_uses_the_same_policy_table_as_suitability():
     default_checks = {c.rule_id: c for c in run_package_checks(documents)}
     assert default_checks["FIT-001"].status == CheckStatus.RISK
     assert "부적합" in default_checks["REC-001"].document_excerpt
+
+
+def test_yeobu_survives_margin_label_inserted_between_syllables():
+    """실물 서류는 여백 라벨이 낱말 한가운데를 가른다 — 신한 ELS 핵심설명서 실측.
+
+        …발행조건에 따른 원금보장여
+        - 168 -
+        투자자
+        유의사항
+        부와 관계없이 시장상황에 따라 원금손실이 발생할 수 있습니다.
+
+    쪽번호만 지워서는 '여부'가 붙지 않는다. 정상 위험고지를 부당권유로
+    잡으면 안 된다.
+    """
+    from src.verify.financial_rules import find_guarantee_claims
+
+    text = (
+        "본 증권을 만기 이전에 중도환매 할 경우 발행조건에 따른 원금보장여\n"
+        "- 168 -\n\n투자자\n유의사항\n"
+        "부와 관계없이 시장상황에 따라 원금손실이 발생할 수 있습니다.\n"
+    )
+    assert find_guarantee_claims(text) == []
+    # 그렇다고 '하여'까지 삼키면 안 된다.
+    assert find_guarantee_claims("수익을 보장하여 드립니다.")
