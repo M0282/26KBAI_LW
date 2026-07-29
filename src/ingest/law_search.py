@@ -24,8 +24,15 @@ class LawSearchResult:
 
     @property
     def citation(self) -> str:
-        article = f" 제{self.article_no}조" if self.article_no else ""
-        return f"{self.source}{article}"
+        if not self.article_no:
+            return self.source
+        # 가지조문은 "16의2" 로 저장된다(articles.py 스키마). 그대로 제{번호}조 로
+        # 감싸면 "제16의2조" 가 되는데, 올바른 표기는 "제16조의2" 다.
+        # 근거 조문을 내세우는 도구에서 조문 번호를 틀리게 쓰면 신뢰를 잃는다
+        # (실측: 방문판매 질의에 제16조의2·제21조의2가 잘못된 표기로 노출됨).
+        main, _, branch = str(self.article_no).partition("의")
+        article = f"제{main}조의{branch}" if branch else f"제{main}조"
+        return f"{self.source} {article}"
 
 
 def load_article_chunks(directory: str | Path = "data/regulations") -> list[dict]:

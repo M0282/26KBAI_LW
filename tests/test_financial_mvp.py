@@ -79,6 +79,33 @@ def test_local_law_search_prefers_requested_article():
     assert results[0].article_no == "17"
 
 
+def test_branch_article_citation_uses_legal_format():
+    """가지조문은 '제16조의2'다. '제16의2조'로 쓰면 조문을 잘못 인용하는 것이다."""
+    chunks = [
+        {
+            "source": "금융소비자 보호에 관한 법률",
+            "source_type": "law",
+            "article_no": "21의2",
+            "title": "방문판매 및 전화권유판매 관련 준수사항",
+            "text": "금융상품판매업자등은 방문판매를 하는 경우 준수사항을 지켜야 한다.",
+        },
+        {
+            "source": "금융소비자 보호에 관한 법률",
+            "source_type": "law",
+            "article_no": "21",
+            "title": "부당권유행위 금지",
+            "text": "금융상품판매업자등은 부당한 권유행위를 하여서는 아니 된다.",
+        },
+    ]
+    # 지정 조문 경로로 조회한다. BM25는 코퍼스가 2건뿐이면 IDF가 0 이하가 되어
+    # 점수 기반 결과가 비는데, 그건 검색 특성이지 인용 표기와는 무관하다.
+    found = {result.article_no: result.citation for result in
+             search_local_laws("방문판매 준수사항", chunks=chunks,
+                               preferred_articles=("21의2", "21"), top_k=2)}
+    assert found["21의2"] == "금융소비자 보호에 관한 법률 제21조의2"
+    assert found["21"] == "금융소비자 보호에 관한 법률 제21조"
+
+
 def test_ai_reasoner_falls_back_without_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     documents = [doc("a.pdf", "unknown", "")]
