@@ -12,6 +12,32 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+
+def _running_under_streamlit() -> bool:
+    """`streamlit run` 으로 실행됐는지. 아니면 화면이 뜨지 않는다.
+
+    streamlit.runtime.exists() 로는 판별할 수 없다 — 1.60의 uvicorn 기반
+    서버에서는 스크립트 실행 중에도 False가 나와서, 그걸 믿고 종료하면
+    앱 전체가 500으로 죽는다(실측). 스크립트 컨텍스트 유무로 판별한다.
+    """
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+    except ImportError:  # 내부 API라 향후 옮겨질 수 있다 — 그때는 검사를 건너뛴다.
+        return True
+    return get_script_run_ctx() is not None
+
+
+# `python app/main.py` 로 실행하면 streamlit이 경고 수십 줄만 쏟아내고 화면은
+# 뜨지 않는다. 무엇을 잘못했는지 알기 어려우므로 여기서 먼저 알려준다.
+if not _running_under_streamlit():
+    print(
+        "\n이 파일은 Streamlit 앱이라 `python` 으로는 실행되지 않습니다.\n"
+        "\n  Windows : run.bat 을 더블클릭하세요 (가장 간단합니다)\n"
+        "  직접 실행: streamlit run app/main.py\n"
+        "\n자세한 안내는 실행안내.md 를 보세요.\n"
+    )
+    raise SystemExit(1)
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
