@@ -266,3 +266,26 @@ def test_real_fee_wording_is_still_detected():
     text = ("상품설명서\n위험등급: 1등급\n원금손실: 원금이 보장되지 않습니다.\n"
             "수수료: 선취판매수수료 1.0%, 운용보수 연 0.7%")
     assert _missing_explanations(_product_doc(text)) == []
+
+
+def test_vision_grade_rejects_answers_that_only_mention_numbers():
+    """비전이 '등급을 못 찾았다'고 답한 것을 등급으로 읽으면 판정이 뒤집힌다."""
+    from src.parser.financial_extractor import parse_vision_grade
+
+    # 등급을 못 찾았다는 답 — 숫자가 섞여 있어도 채택하면 안 된다.
+    assert parse_vision_grade("표시 없음(1~6 중 판단 불가)") is None
+    assert parse_vision_grade("6개 항목 중 표시 없음") is None
+    assert parse_vision_grade("없음") is None
+    assert parse_vision_grade(None) is None
+    assert parse_vision_grade(True) is None
+    assert parse_vision_grade(0) is None
+    assert parse_vision_grade(7) is None
+
+
+def test_vision_grade_accepts_a_bare_grade():
+    from src.parser.financial_extractor import parse_vision_grade
+
+    assert parse_vision_grade("3") == "3등급"
+    assert parse_vision_grade("3등급") == "3등급"
+    assert parse_vision_grade(" 5 ") == "5등급"
+    assert parse_vision_grade(1) == "1등급"

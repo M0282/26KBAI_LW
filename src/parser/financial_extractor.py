@@ -301,8 +301,31 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
     텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
     """
     answer = _vision_ask(image_bytes, _VISION_GRADE_PROMPT, "vision-grade")
-    m = re.search(r"[1-6]", answer or "")
-    return f"{m.group(0)}등급" if m else None
+    return parse_vision_grade(answer)
+
+
+# 비전 답변에서 위험등급을 읽을 때는 '답변이 등급 하나'일 때만 인정한다.
+_VISION_GRADE_ANSWER = re.compile(r"\s*([1-6])\s*(?:등급)?\s*")
+
+
+def parse_vision_grade(answer: object) -> str | None:
+    """비전이 답한 위험등급. 등급을 단독으로 답했을 때만 채택한다.
+
+    예전에는 답변 어디서든 첫 1~6 숫자를 집었다. 그래서 등급을 못 찾았다는
+    답이 등급으로 둔갑했다(실측):
+        "표시 없음(1~6 중 판단 불가)"  → 1등급
+        "6개 항목 중 표시 없음"        → 6등급
+    1등급은 거의 모든 투자성향에서 FIT-001 위험을 만들고, 6등급은 반대로
+    전부 통과시킨다 — 어느 쪽이든 판정이 뒤집힌다. 위험등급은 이 도구의
+    대표 규칙을 좌우하는 값이라 애매하면 채택하지 않는 편이 옳다.
+    """
+    if answer is None or isinstance(answer, bool):
+        return None
+    if isinstance(answer, (int, float)):
+        number = int(answer)
+        return f"{number}등급" if 1 <= number <= 6 else None
+    match = _VISION_GRADE_ANSWER.fullmatch(str(answer))
+    return f"{match.group(1)}등급" if match else None
 
 
 _VISION_SIGNATURE_PROMPT = (
@@ -888,10 +911,10 @@ def _fill_from_vision(
         payload = vision_read_page(image, tuple(wanted))
 
         if "risk_grade" in wanted:
-            m = re.search(r"[1-6]", str(payload.get("risk_grade") or ""))
-            if m:
+            grade = parse_vision_grade(payload.get("risk_grade"))
+            if grade:
                 field = by_name["product_risk_level"]
-                field.value, field.confidence, field.page = f"{m.group(0)}등급", 0.85, page_number
+                field.value, field.confidence, field.page = grade, 0.85, page_number
                 wanted.remove("risk_grade")
 
         if "contract_date" in wanted:
