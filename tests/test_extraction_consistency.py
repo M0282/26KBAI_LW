@@ -235,3 +235,34 @@ def test_two_digit_year_is_not_turned_into_year_26():
     assert parse_iso_date(_normalize_date("26.07.15")) is None
     # 네 자리 연도는 그대로 정규화된다.
     assert _normalize_date("2026.07.15") == "2026-07-15"
+
+
+def _product_doc(text):
+    from src.common.schemas import ParsedDocument
+    from src.parser.financial_extractor import extract_rule_based
+
+    parsed = ParsedDocument(document_id="p.pdf", doc_type="product_description",
+                            raw_text=text, fields=[])
+    result = extract_rule_based(parsed)
+    return ParsedDocument(document_id="p.pdf", doc_type="product_description",
+                          raw_text=text, fields=result.fields)
+
+
+def test_generic_cost_words_do_not_count_as_fee_explanation():
+    """'비용'·'보수'가 엉뚱한 문맥으로만 나와도 설명 이행으로 보던 미탐."""
+    from src.verify.financial_rules import _missing_explanations
+
+    for text in (
+        "상품설명서\n위험등급: 1등급\n원금손실 가능.\n본 안내장 제작 비용은 당사가 부담합니다.",
+        "상품설명서\n위험등급: 1등급\n원금손실 가능.\n담당자: 김보수",
+    ):
+        assert "수수료·비용" in _missing_explanations(_product_doc(text)), text
+
+
+def test_real_fee_wording_is_still_detected():
+    """실물 설명서가 쓰는 복합어(판매수수료·운용보수)는 그대로 잡혀야 한다."""
+    from src.verify.financial_rules import _missing_explanations
+
+    text = ("상품설명서\n위험등급: 1등급\n원금손실: 원금이 보장되지 않습니다.\n"
+            "수수료: 선취판매수수료 1.0%, 운용보수 연 0.7%")
+    assert _missing_explanations(_product_doc(text)) == []
