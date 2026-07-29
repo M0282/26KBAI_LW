@@ -210,3 +210,28 @@ def test_acknowledgement_positive_value_is_kept():
     from src.parser.financial_extractor import SIGNED, UNSIGNED, normalize_field
 
     assert normalize_field("customer_acknowledgement", SIGNED) != UNSIGNED
+
+
+def test_signed_values_containing_없음_are_not_flagged_unsigned():
+    """'특이사항 없음'처럼 정상 서명 문구에도 '없음'이 들어간다 — 오탐을 내면 안 된다."""
+    from src.parser.financial_extractor import _states_unsigned
+
+    for value in ("확인함, 특이사항 없음", "서명 완료 / 누락 없음", "이의 없음 확인 서명"):
+        assert _states_unsigned(value) is False, value
+
+
+def test_unsigned_markers_are_still_detected():
+    from src.parser.financial_extractor import _states_unsigned
+
+    for value in ("미서명", "서명 없음", "미확인", "아니오", "(공란)", "없음", "미기재"):
+        assert _states_unsigned(value) is True, value
+
+
+def test_two_digit_year_is_not_turned_into_year_26():
+    """'26.07.15'를 서기 26년으로 만들면 계약 이후 설명을 정상으로 통과시킨다."""
+    from src.parser.financial_extractor import _normalize_date, parse_iso_date
+
+    assert _normalize_date("26.07.15") == "26.07.15"
+    assert parse_iso_date(_normalize_date("26.07.15")) is None
+    # 네 자리 연도는 그대로 정규화된다.
+    assert _normalize_date("2026.07.15") == "2026-07-15"

@@ -141,6 +141,13 @@ def _normalize_date(value: str) -> str:
         return f"{y:04d}-{m:02d}-{d:02d}"
     parts = re.split(r"[./-]", value)
     if len(parts) == 3 and all(part.isdigit() for part in parts):
+        # 두 자리 연도는 세기를 지어내지 않고 원문 그대로 둔다. 그래야 뒤에서
+        # 날짜로 읽히지 않아 '형식 확인' 경고가 뜬다.
+        # 예전에는 "26.07.15"를 서기 26년으로 만들어 버렸다 — 그러면 설명일이
+        # 계약일보다 2000년 앞서게 되어, 계약 이후 설명(DATE-001 위반)을
+        # 정상으로 통과시킨다(실측: 설명일 26.07.15 / 계약일 2026-07-12 → PASS).
+        if len(parts[0]) != 4:
+            return value
         y, m, d = map(int, parts)
         return f"{y:04d}-{m:02d}-{d:02d}"
     return value
@@ -301,14 +308,22 @@ _VISION_SIGNATURE_PROMPT = (
 SIGNED = "확인(서명 기재)"
 UNSIGNED = "미서명"
 # 서류가 스스로 '확인받지 못했다'고 적어둔 표현. ACK-001의 부정 판정어와 같은 집합.
-_UNSIGNED_TOKENS = ("미확인", "없음", "미서명", "아니오")
+_UNSIGNED_TOKENS = ("미확인", "미서명", "미기재", "아니오", "공란", "빈칸")
+# '없음'은 무엇이 없는지까지 봐야 한다. 그냥 부분 문자열로 찾으면 '특이사항 없음',
+# '이의 없음 확인 서명'처럼 정상 서명 문구를 미서명으로 판정한다(실측: 오탐 3건).
+# 컴플라이언스 도구에서 오탐은 미탐만큼 나쁘다 — 정상 건이 빨간불이면 안 쓰게 된다.
+_UNSIGNED_PHRASES = ("서명없음", "확인없음", "기재없음", "날인없음", "서명란없음")
 
 
 def _states_unsigned(value: str) -> bool:
     compact = value.replace(" ", "")
     if compact.lower() in ("false", "no"):  # LLM이 불리언으로 내는 경우
         return True
-    return any(token in compact for token in _UNSIGNED_TOKENS)
+    if compact in ("없음", "무", "-"):  # 값 자체가 '없음'이면 서명이 없다는 뜻
+        return True
+    if any(token in compact for token in _UNSIGNED_TOKENS):
+        return True
+    return any(phrase in compact for phrase in _UNSIGNED_PHRASES)
 
 
 def vision_scan_signature(image_bytes: bytes) -> str | None:
