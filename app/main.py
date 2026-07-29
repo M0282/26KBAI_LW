@@ -156,6 +156,8 @@ st.info(
     "① **적합성 진단표** — 고객 투자성향 ② **상품설명서**(투자설명서) — 상품 위험등급 "
     "③ **가입신청서**(계약서) — 계약일·서명 ④ **설명 확인서** — 설명 이행 확인\n\n"
     "서류가 빠지면 그 항목은 검증할 수 없어 '누락'으로 표시됩니다. "
+    "**비대면(모바일) 가입은 ④ 설명 확인서가 별도 파일로 없습니다** — 아래 체크박스를 "
+    "표시하면 계약서의 확인 문구와 전자서명을 증빙으로 인정합니다.\n\n"
     "여러 계약을 검증하려면 아래 **판매 건 추가**로 칸을 늘리세요 — 칸별로 따로 판정합니다."
 )
 
@@ -183,6 +185,17 @@ for slot in range(st.session_state.package_count):
             "이 건의 고객은 고령투자자(만 65세 이상)입니다",
             key=f"elderly_{slot}",
             help="해당하면 고위험 상품이 아니어도 녹취 의무 대상일 수 있습니다.",
+        )
+        # 판매 채널도 서류에서 읽히지 않는다. 비대면은 설명확인서가 별도 파일로
+        # 존재하지 않고 계약서의 확인 문구 + 전자서명이 그 역할을 하므로,
+        # 표시된 건에서만 '서류 누락'을 '확인 사항'으로 낮춘다.
+        st.checkbox(
+            "이 건은 비대면(모바일·인터넷) 가입입니다",
+            key=f"nonface_{slot}",
+            help="비대면은 설명 확인서가 별도 파일로 없고 계약서의 확인 문구와 전자서명이 "
+            "그 역할을 합니다. 체크하면 설명 확인서가 없어도 '누락'이 아니라 '주의'로 "
+            "표시하고, 전자문서함 기록을 함께 확인하도록 안내합니다. "
+            "영업점 판매라면 체크하지 마세요 — 그때는 확인서가 실제로 있어야 합니다.",
         )
         uploaded_packages.append(list(files or []))
 
@@ -226,10 +239,13 @@ def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_ty
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def verify_package(document_payloads: tuple[str, ...], with_llm: bool, elderly: bool = False):
+def verify_package(document_payloads: tuple[str, ...], with_llm: bool, elderly: bool = False,
+                   non_face_to_face: bool = False):
     """패키지 판정·쟁점 생성. 문서 내용이 같으면 재실행하지 않는다."""
     documents = [ParsedDocument.model_validate_json(p) for p in document_payloads]
-    package_checks = run_package_checks(documents, elderly_investor=elderly)
+    package_checks = run_package_checks(
+        documents, elderly_investor=elderly, non_face_to_face=non_face_to_face
+    )
     return package_checks, build_legal_issues(documents, package_checks, use_llm=with_llm)
 
 
@@ -318,6 +334,7 @@ for order, slot in enumerate(active_slots, start=1):
             tuple(d.model_dump_json() for d in documents),
             use_llm,
             bool(st.session_state.get(f"elderly_{slot}")),
+            bool(st.session_state.get(f"nonface_{slot}")),
         )
         if documents else ([], {})
     )
@@ -325,6 +342,7 @@ for order, slot in enumerate(active_slots, start=1):
         "slot": slot,
         "label": f"판매 건 {slot + 1}",
         "elderly": bool(st.session_state.get(f"elderly_{slot}")),
+        "nonface": bool(st.session_state.get(f"nonface_{slot}")),
         "documents": documents,
         "pdfs": pdfs,
         "raw": raw_map,
@@ -362,6 +380,7 @@ if len(packages) > 1:
             "판매 건": package["label"],
             "상품": product,
             "고령투자자": "예" if package["elderly"] else "—",
+            "판매채널": "비대면" if package["nonface"] else "대면",
             "종합 판정": verdict,
             "위험": counts[CheckStatus.RISK],
             "누락": counts[CheckStatus.MISSING],
@@ -588,6 +607,7 @@ report = {
         "live_law_lookup": live_law,
         "profile_min_grade": dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE),
         "elderly_investor": package["elderly"],
+        "non_face_to_face": package["nonface"],
     },
     "documents": [
         {

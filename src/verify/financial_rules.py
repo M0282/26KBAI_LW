@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from src.common.schemas import CheckStatus, ParsedDocument, RuleCheck
-from src.parser.financial_extractor import field_map, parse_iso_date
+from src.parser.financial_extractor import field_map, parse_iso_date, states_unsigned
 
 
 @dataclass(frozen=True)
@@ -81,11 +81,27 @@ _GUARANTEE_CLAIMS = (
     r"반드시수익",
 )
 # 뒤에 이런 표현이 붙으면 위반이 아니다(부정 고지 또는 상품 유형명).
-# '여'는 사실상 언제나 '여부'(원금보장 여부)다 — 중립적 질의 표현이지 보장 약속이 아니다.
-# 머리글이 낱말 사이에 끼어 '여부'가 쪼개지는 실물 사례가 있어 '여'만으로도 인정한다.
 _CLAIM_EXCEPTIONS = (
-    "되지", "되지않", "않", "아닙", "아니", "없는", "불가", "추구", "형", "여", "제외",
+    "되지", "되지않", "않", "아닙", "아니", "없는", "불가", "추구", "형", "제외",
 )
+# '원금보장 여부'는 중립적 질의 표현이지 보장 약속이 아니다. 그런데 실물 서류에서는
+# 이 낱말이 통째로 쪼개진다 — 신한 ELS 핵심설명서 실측:
+#
+#     …발행조건에 따른 원금보장여
+#     - 168 -
+#     투자자
+#     유의사항
+#     부와 관계없이 시장상황에 따라 원금손실이 발생할 수 있습니다.
+#
+# 쪽번호는 _PAGE_ARTIFACT 가 지우지만 여백 라벨('투자자 유의사항')은 남아서
+# '여'와 '부' 사이에 끼어든다. 그래서 '여부'를 붙어 있는 낱말로만 찾으면
+# 이 정상 위험고지가 부당권유로 잡힌다(오탐).
+#
+# 반대로 '여' 한 글자만으로 예외 처리하면 '하여·위하여·관하여'를 전부 삼켜
+# "수익을 보장하여 드립니다" 같은 명백한 위반을 놓친다(미탐).
+#
+# 그래서 '여 … 부'를 짧은 거리 안에서 함께 볼 때만 여부로 인정한다.
+_CLAIM_YEOBU = re.compile(r"여.{0,10}?부")
 _EXCEPTION_WINDOW = 12  # 표현 직후 이 글자 수 안에 예외어가 있으면 정상으로 본다
 
 
@@ -102,6 +118,8 @@ def find_guarantee_claims(text: str) -> list[str]:
             tail = compact[match.end() : match.end() + _EXCEPTION_WINDOW]
             if any(token in tail for token in _CLAIM_EXCEPTIONS):
                 continue  # "원금보장되지 않습니다" / "원금보장추구형" → 정상
+            if _CLAIM_YEOBU.search(tail):
+                continue  # "원금보장 여부" (여백 라벨이 낱말을 쪼갠 경우 포함) → 정상
             start = max(0, match.start() - 20)
             found.append(compact[start : match.end() + 20])
     return found
@@ -365,11 +383,10 @@ _ACK_SUBSTITUTE_PHRASES = (
 )
 
 
-def _is_negative_ack(value: str) -> bool:
-    """서류가 '확인받지 못했다'고 적은 표현인지(미서명 / 없음 / 미확인 …)."""
-    return any(
-        token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
-    )
+# 부정 증빙 판정은 추출 모듈의 states_unsigned 하나로 통일한다.
+# 예전에는 여기에 같은 개념을 따로 구현해 뒀는데, 한쪽만 고치자 "이의 없음 확인
+# 서명"에 대해 ACK-001은 위험, DOC-001은 누락을 내는 모순이 실제로 재현됐다.
+_is_negative_ack = states_unsigned
 
 
 def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
@@ -384,8 +401,19 @@ def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
     )
 
 
-def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
-    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조)."""
+def check_document_set(
+    documents: list[ParsedDocument], non_face_to_face: bool = False
+) -> RuleCheck:
+    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조).
+
+    non_face_to_face: 비대면(모바일·인터넷) 가입 여부. 비대면에서는 설명확인서가
+        별도 파일로 존재하지 않고 계약서의 확인 문구 + 전자서명이 그 역할을 한다.
+        판매 채널은 서류에서 읽히지 않으므로 검토자가 표시한다(고령 여부와 같다).
+
+        예전에는 이 인자가 없어서, 서류에 확인 문구만 있으면 채널과 무관하게
+        '주의'로 낮췄다. 그러면 영업점에서 설명확인서를 실제로 빠뜨린 건도
+        계약서에 인쇄된 문구 때문에 누락으로 드러나지 않는다.
+    """
     present = {d.doc_type for d in documents}
     missing = [t for t in REQUIRED_DOC_TYPES if t not in present]
     if not missing:
@@ -397,7 +425,13 @@ def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
         )
     # 설명확인서만 없고 그 내용이 다른 서류에 통합돼 있으면 비대면 판매의 정상 형태다.
     # 서류 자체는 계속 요구하되(회사는 전자문서로 보유해야 한다) 위반이 아닌 확인 사항으로 낮춘다.
-    if missing == ["acknowledgement"] and has_embedded_acknowledgement(documents):
+    # 대면 판매로 표시된 건에는 이 완화를 적용하지 않는다 — 영업점에서 설명확인서를
+    # 받지 않았다면 그건 통합 양식이 아니라 진짜 누락이다.
+    if (
+        non_face_to_face
+        and missing == ["acknowledgement"]
+        and has_embedded_acknowledgement(documents)
+    ):
         return RuleCheck(
             rule_id="DOC-001",
             description="판매서류 4종 구비 여부",
@@ -423,7 +457,9 @@ RECORDING_RISK_GRADES = (1, 2)
 
 
 def check_recording_requirement(
-    documents: list[ParsedDocument], elderly_investor: bool = False
+    documents: list[ParsedDocument],
+    elderly_investor: bool = False,
+    profile_min_grade: dict[str, int] | None = None,
 ) -> RuleCheck:
     """녹취 의무 대상 여부를 표시한다.
 
@@ -433,11 +469,17 @@ def check_recording_requirement(
 
     elderly_investor: 만 65세 이상 여부. 우리는 개인정보(생년월일)를 추출하지 않으므로
         화면에서 검토자가 입력한다.
+    profile_min_grade: 적합성 정책표. FIT-001과 **같은 표**를 써야 한다. 예전에는
+        인자를 받지 않아 늘 기본표로 재계산했고, 은행이 정책을 완화하면
+        FIT-001은 '적합'인데 REC-001은 '투자성향 부적합 판매'를 이유로 드는
+        모순이 생겼다(실측: 안정형 고객·5등급 상품, 안정형 최소등급을 4로 완화).
     """
     risks = _documents_with(documents, "product_risk_level")
     grades = [g for _, value in risks if (g := _risk_number(value)) is not None]
     high_risk = [g for g in grades if g in RECORDING_RISK_GRADES]
-    unsuitable = check_suitability(documents).status is CheckStatus.RISK
+    unsuitable = check_suitability(
+        documents, profile_min_grade=profile_min_grade
+    ).status is CheckStatus.RISK
 
     reasons: list[str] = []
     if high_risk:
@@ -576,6 +618,7 @@ def run_package_checks(
     documents: list[ParsedDocument],
     profile_min_grade: dict[str, int] | None = None,
     elderly_investor: bool = False,
+    non_face_to_face: bool = False,
 ) -> list[RuleCheck]:
     # profile_min_grade: 적합성 등급 매트릭스(규정 파라미터). 개정 시 이 값을 바꿔
     # 재검증하면 판정 변화를 확인할 수 있다(규정 개정 재검증). 기본은 현행 매트릭스.
@@ -585,9 +628,14 @@ def run_package_checks(
         check_dates(documents),
         check_acknowledgement(documents),
     ]
-    product_documents = [document for document in documents if document.doc_type == "product_description"]
     checks.append(check_explanations(documents))
     checks.append(check_unfair_solicitation(documents))
-    checks.append(check_document_set(documents))
-    checks.append(check_recording_requirement(documents, elderly_investor=elderly_investor))
+    checks.append(check_document_set(documents, non_face_to_face=non_face_to_face))
+    checks.append(
+        check_recording_requirement(
+            documents,
+            elderly_investor=elderly_investor,
+            profile_min_grade=profile_min_grade,
+        )
+    )
     return checks

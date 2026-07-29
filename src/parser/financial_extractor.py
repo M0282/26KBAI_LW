@@ -33,8 +33,14 @@ DOC_TYPES = {
 # 유형에 없는 필드는 아예 담지 않고, 있는 필드는 값이 없어도 자리를 남긴다(미확인).
 # 상품설명서에 고객확인·계약일이 없는 것은 문서의 성격이지 추출 실패가 아니다.
 DOC_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
+    # 적합성 진단표에는 설명일을 두지 않는다. 이 서류의 날짜는 '투자성향 기준일'
+    # (진단일)이지 상품 설명을 한 날이 아니다. 자리를 열어 두면 LLM이 그 날짜를
+    # 설명일로 볼지 말지 회차마다 갈리고, 그 값 하나로 DATE-001이 통과↔위험으로
+    # 뒤집힌다(실측: 실물 진단표 3회 판독 중 2회만 2026-07-24를 설명일로 냈고,
+    # 그 값이 들어가면 계약일보다 늦어 위반 판정이 됐다).
+    # 설명일은 설명확인서에서 받는다.
     "suitability_form": (
-        "customer_profile", "explanation_date", "customer_acknowledgement",
+        "customer_profile", "customer_acknowledgement",
         "staff_name", "principal_loss_explained", "risk_level_explained",
     ),
     "product_description": (
@@ -103,7 +109,14 @@ SEMANTIC_EXPLANATION_FIELDS = {
         "투자금액을 하회", "손실은 투자자에게 귀속",
     ],
     "risk_level_explained": ["위험등급", "위험 수준", "위험도"],
-    "fees_explained": ["수수료", "보수", "비용", "판매보수", "운용보수"],
+    # '비용'·'보수'는 두 글자짜리 일반어라 엉뚱한 문맥에도 걸린다. 실측 —
+    # "본 안내장 제작 비용은 당사가 부담합니다", "담당자: 김보수" 만으로
+    # 수수료 설명이 이행됐다고 판정했다(EXP-001 미탐, 금소법 19조).
+    # 실물 상품설명서는 수수료를 33회·보수를 28회 쓰는데 전부 복합어
+    # (판매수수료·판매보수·총보수)라 좁혀도 탐지에는 지장이 없다.
+    "fees_explained": [
+        "수수료", "판매보수", "운용보수", "수탁보수", "총보수", "보수율", "제비용",
+    ],
 }
 
 ALL_FIELD_NAMES = tuple(FIELD_PATTERNS) + tuple(SEMANTIC_EXPLANATION_FIELDS)
@@ -141,6 +154,13 @@ def _normalize_date(value: str) -> str:
         return f"{y:04d}-{m:02d}-{d:02d}"
     parts = re.split(r"[./-]", value)
     if len(parts) == 3 and all(part.isdigit() for part in parts):
+        # 두 자리 연도는 세기를 지어내지 않고 원문 그대로 둔다. 그래야 뒤에서
+        # 날짜로 읽히지 않아 '형식 확인' 경고가 뜬다.
+        # 예전에는 "26.07.15"를 서기 26년으로 만들어 버렸다 — 그러면 설명일이
+        # 계약일보다 2000년 앞서게 되어, 계약 이후 설명(DATE-001 위반)을
+        # 정상으로 통과시킨다(실측: 설명일 26.07.15 / 계약일 2026-07-12 → PASS).
+        if len(parts[0]) != 4:
+            return value
         y, m, d = map(int, parts)
         return f"{y:04d}-{m:02d}-{d:02d}"
     return value
@@ -287,8 +307,31 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
     텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
     """
     answer = _vision_ask(image_bytes, _VISION_GRADE_PROMPT, "vision-grade")
-    m = re.search(r"[1-6]", answer or "")
-    return f"{m.group(0)}등급" if m else None
+    return parse_vision_grade(answer)
+
+
+# 비전 답변에서 위험등급을 읽을 때는 '답변이 등급 하나'일 때만 인정한다.
+_VISION_GRADE_ANSWER = re.compile(r"\s*([1-6])\s*(?:등급)?\s*")
+
+
+def parse_vision_grade(answer: object) -> str | None:
+    """비전이 답한 위험등급. 등급을 단독으로 답했을 때만 채택한다.
+
+    예전에는 답변 어디서든 첫 1~6 숫자를 집었다. 그래서 등급을 못 찾았다는
+    답이 등급으로 둔갑했다(실측):
+        "표시 없음(1~6 중 판단 불가)"  → 1등급
+        "6개 항목 중 표시 없음"        → 6등급
+    1등급은 거의 모든 투자성향에서 FIT-001 위험을 만들고, 6등급은 반대로
+    전부 통과시킨다 — 어느 쪽이든 판정이 뒤집힌다. 위험등급은 이 도구의
+    대표 규칙을 좌우하는 값이라 애매하면 채택하지 않는 편이 옳다.
+    """
+    if answer is None or isinstance(answer, bool):
+        return None
+    if isinstance(answer, (int, float)):
+        number = int(answer)
+        return f"{number}등급" if 1 <= number <= 6 else None
+    match = _VISION_GRADE_ANSWER.fullmatch(str(answer))
+    return f"{match.group(1)}등급" if match else None
 
 
 _VISION_SIGNATURE_PROMPT = (
@@ -301,14 +344,27 @@ _VISION_SIGNATURE_PROMPT = (
 SIGNED = "확인(서명 기재)"
 UNSIGNED = "미서명"
 # 서류가 스스로 '확인받지 못했다'고 적어둔 표현. ACK-001의 부정 판정어와 같은 집합.
-_UNSIGNED_TOKENS = ("미확인", "없음", "미서명", "아니오")
+_UNSIGNED_TOKENS = ("미확인", "미서명", "미기재", "아니오", "공란", "빈칸")
+# '없음'은 무엇이 없는지까지 봐야 한다. 그냥 부분 문자열로 찾으면 '특이사항 없음',
+# '이의 없음 확인 서명'처럼 정상 서명 문구를 미서명으로 판정한다(실측: 오탐 3건).
+# 컴플라이언스 도구에서 오탐은 미탐만큼 나쁘다 — 정상 건이 빨간불이면 안 쓰게 된다.
+_UNSIGNED_PHRASES = ("서명없음", "확인없음", "기재없음", "날인없음", "서명란없음")
 
 
-def _states_unsigned(value: str) -> bool:
+def states_unsigned(value: str) -> bool:
+    """서류가 스스로 '확인받지 못했다'고 적은 표현인지.
+
+    추출(정규화)과 판정(ACK-001·DOC-001)이 같은 기준을 써야 한다.
+    한쪽만 고치면 같은 서류에 모순된 판정이 나온다(실측).
+    """
     compact = value.replace(" ", "")
     if compact.lower() in ("false", "no"):  # LLM이 불리언으로 내는 경우
         return True
-    return any(token in compact for token in _UNSIGNED_TOKENS)
+    if compact in ("없음", "무", "-"):  # 값 자체가 '없음'이면 서명이 없다는 뜻
+        return True
+    if any(token in compact for token in _UNSIGNED_TOKENS):
+        return True
+    return any(phrase in compact for phrase in _UNSIGNED_PHRASES)
 
 
 def vision_scan_signature(image_bytes: bytes) -> str | None:
@@ -381,7 +437,7 @@ def normalize_field(name: str, value: str | None) -> str | None:
         # 서류가 '확인받지 못했다'고 적은 표현은 표기가 제각각이다(미서명 / False / 없음).
         # ACK-001은 부정 표현을 보고 위험을 내므로, 여기서 표준 문구로 모아준다.
         # (실측: LLM이 '미서명'을 'False'로 내보내 규칙이 부정으로 못 읽고 통과시켰다)
-        return UNSIGNED if _states_unsigned(value) else _compact(value)
+        return UNSIGNED if states_unsigned(value) else _compact(value)
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -861,10 +917,10 @@ def _fill_from_vision(
         payload = vision_read_page(image, tuple(wanted))
 
         if "risk_grade" in wanted:
-            m = re.search(r"[1-6]", str(payload.get("risk_grade") or ""))
-            if m:
+            grade = parse_vision_grade(payload.get("risk_grade"))
+            if grade:
                 field = by_name["product_risk_level"]
-                field.value, field.confidence, field.page = f"{m.group(0)}등급", 0.85, page_number
+                field.value, field.confidence, field.page = grade, 0.85, page_number
                 wanted.remove("risk_grade")
 
         if "contract_date" in wanted:
@@ -888,7 +944,7 @@ def _fill_from_vision(
         field = by_name["customer_acknowledgement"]
         if signature_verdict is not None:
             field.value, field.confidence = signature_verdict, 0.85
-        elif field.value and not _states_unsigned(field.value):
+        elif field.value and not states_unsigned(field.value):
             # 서명란을 찾지 못했는데 텍스트만 보고 '확인'을 낸 값은 근거가 없다.
             # 다만 '미서명'처럼 서류가 명시적으로 부정을 적어둔 경우는 그 자체가
             # 증거이므로 지우지 않는다(지우면 위험이 누락으로 약해진다).
