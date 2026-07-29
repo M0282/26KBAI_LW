@@ -14,6 +14,9 @@ venv/
 # 데이터 (샘플 소량만 data/samples/ 에 커밋 허용)
 data/regulations/*
 !data/regulations/.gitkeep
+# 조문 청크는 커밋한다(0.64MB) — 제출본에서 근거 조문 검색이 동작해야 한다.
+# 원본 API 응답(*.raw.json, 1.6MB)은 재수집용이라 제외한다.
+!data/regulations/*.articles.json
 *.db
 chroma/
 
