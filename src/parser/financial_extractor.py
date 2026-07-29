@@ -315,7 +315,12 @@ _UNSIGNED_TOKENS = ("미확인", "미서명", "미기재", "아니오", "공란"
 _UNSIGNED_PHRASES = ("서명없음", "확인없음", "기재없음", "날인없음", "서명란없음")
 
 
-def _states_unsigned(value: str) -> bool:
+def states_unsigned(value: str) -> bool:
+    """서류가 스스로 '확인받지 못했다'고 적은 표현인지.
+
+    추출(정규화)과 판정(ACK-001·DOC-001)이 같은 기준을 써야 한다.
+    한쪽만 고치면 같은 서류에 모순된 판정이 나온다(실측).
+    """
     compact = value.replace(" ", "")
     if compact.lower() in ("false", "no"):  # LLM이 불리언으로 내는 경우
         return True
@@ -396,7 +401,7 @@ def normalize_field(name: str, value: str | None) -> str | None:
         # 서류가 '확인받지 못했다'고 적은 표현은 표기가 제각각이다(미서명 / False / 없음).
         # ACK-001은 부정 표현을 보고 위험을 내므로, 여기서 표준 문구로 모아준다.
         # (실측: LLM이 '미서명'을 'False'로 내보내 규칙이 부정으로 못 읽고 통과시켰다)
-        return UNSIGNED if _states_unsigned(value) else _compact(value)
+        return UNSIGNED if states_unsigned(value) else _compact(value)
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -903,7 +908,7 @@ def _fill_from_vision(
         field = by_name["customer_acknowledgement"]
         if signature_verdict is not None:
             field.value, field.confidence = signature_verdict, 0.85
-        elif field.value and not _states_unsigned(field.value):
+        elif field.value and not states_unsigned(field.value):
             # 서명란을 찾지 못했는데 텍스트만 보고 '확인'을 낸 값은 근거가 없다.
             # 다만 '미서명'처럼 서류가 명시적으로 부정을 적어둔 경우는 그 자체가
             # 증거이므로 지우지 않는다(지우면 위험이 누락으로 약해진다).

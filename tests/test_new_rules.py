@@ -186,3 +186,35 @@ def test_guarantee_claim_still_ignores_proper_disclosure():
 
     assert not find_guarantee_claims("본 상품은 원금이 보장되지 않으며 전부 손실될 수 있습니다.")
     assert not find_guarantee_claims("원금보장추구형 구조화 상품")
+
+
+def test_ack_and_doc_rules_agree_on_the_same_value():
+    """부정 증빙 판정이 두 곳에 따로 있으면 같은 서류에 모순된 판정이 나온다.
+
+    실측: '이의 없음 확인 서명'에 대해 ACK-001은 위험, DOC-001은 누락이 나왔다.
+    (비대면 통합 양식 — 설명확인서가 가입신청서에 포함된 정상 형태)
+    """
+    from src.common.schemas import CheckStatus, ParsedDocument, ParsedField
+    from src.verify.financial_rules import run_package_checks
+
+    def build(doc_id, doc_type, text, **fields):
+        return ParsedDocument(
+            document_id=doc_id, doc_type=doc_type, raw_text=text,
+            fields=[ParsedField(name=k, value=v) for k, v in fields.items()],
+        )
+
+    documents = [
+        build("01.pdf", "suitability_form", "투자성향: 안정형",
+              customer_profile="안정형", product_name="KB 펀드"),
+        build("02.pdf", "product_description", "위험등급: 6등급",
+              product_name="KB 펀드", product_risk_level="6등급",
+              principal_loss_explained="확인", risk_level_explained="확인",
+              fees_explained="확인"),
+        build("03.pdf", "application",
+              "위 계약내용에 대해 모두 확인하였으며 주요내용을 충분히 설명듣고 이해하였습니다.",
+              product_name="KB 펀드", contract_date="2026-07-20",
+              customer_acknowledgement="이의 없음 확인 서명", staff_name="이판매"),
+    ]
+    checks = {c.rule_id: c for c in run_package_checks(documents)}
+    assert checks["ACK-001"].status == CheckStatus.PASS
+    assert checks["DOC-001"].status == CheckStatus.WARNING

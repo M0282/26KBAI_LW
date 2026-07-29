@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from src.common.schemas import CheckStatus, ParsedDocument, RuleCheck
-from src.parser.financial_extractor import field_map, parse_iso_date
+from src.parser.financial_extractor import field_map, parse_iso_date, states_unsigned
 
 
 @dataclass(frozen=True)
@@ -369,11 +369,10 @@ _ACK_SUBSTITUTE_PHRASES = (
 )
 
 
-def _is_negative_ack(value: str) -> bool:
-    """서류가 '확인받지 못했다'고 적은 표현인지(미서명 / 없음 / 미확인 …)."""
-    return any(
-        token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
-    )
+# 부정 증빙 판정은 추출 모듈의 states_unsigned 하나로 통일한다.
+# 예전에는 여기에 같은 개념을 따로 구현해 뒀는데, 한쪽만 고치자 "이의 없음 확인
+# 서명"에 대해 ACK-001은 위험, DOC-001은 누락을 내는 모순이 실제로 재현됐다.
+_is_negative_ack = states_unsigned
 
 
 def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:

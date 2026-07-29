@@ -214,17 +214,17 @@ def test_acknowledgement_positive_value_is_kept():
 
 def test_signed_values_containing_없음_are_not_flagged_unsigned():
     """'특이사항 없음'처럼 정상 서명 문구에도 '없음'이 들어간다 — 오탐을 내면 안 된다."""
-    from src.parser.financial_extractor import _states_unsigned
+    from src.parser.financial_extractor import states_unsigned
 
     for value in ("확인함, 특이사항 없음", "서명 완료 / 누락 없음", "이의 없음 확인 서명"):
-        assert _states_unsigned(value) is False, value
+        assert states_unsigned(value) is False, value
 
 
 def test_unsigned_markers_are_still_detected():
-    from src.parser.financial_extractor import _states_unsigned
+    from src.parser.financial_extractor import states_unsigned
 
     for value in ("미서명", "서명 없음", "미확인", "아니오", "(공란)", "없음", "미기재"):
-        assert _states_unsigned(value) is True, value
+        assert states_unsigned(value) is True, value
 
 
 def test_two_digit_year_is_not_turned_into_year_26():
