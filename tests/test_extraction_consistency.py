@@ -289,3 +289,16 @@ def test_vision_grade_accepts_a_bare_grade():
     assert parse_vision_grade("3등급") == "3등급"
     assert parse_vision_grade(" 5 ") == "5등급"
     assert parse_vision_grade(1) == "1등급"
+
+
+def test_suitability_form_does_not_carry_explanation_date():
+    """진단표의 날짜는 '투자성향 기준일'이지 설명일이 아니다.
+
+    자리를 열어 두면 LLM이 회차마다 다르게 판단하고, 그 값 하나로
+    DATE-001이 통과↔위험으로 뒤집힌다(실측: 실물 진단표 3회 중 2회만 값이 나옴).
+    """
+    from src.parser.financial_extractor import DOC_TYPE_FIELDS
+
+    assert "explanation_date" not in DOC_TYPE_FIELDS["suitability_form"]
+    # 설명일은 설명확인서에서 받는다.
+    assert "explanation_date" in DOC_TYPE_FIELDS["acknowledgement"]

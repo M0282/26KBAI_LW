@@ -33,8 +33,14 @@ DOC_TYPES = {
 # 유형에 없는 필드는 아예 담지 않고, 있는 필드는 값이 없어도 자리를 남긴다(미확인).
 # 상품설명서에 고객확인·계약일이 없는 것은 문서의 성격이지 추출 실패가 아니다.
 DOC_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
+    # 적합성 진단표에는 설명일을 두지 않는다. 이 서류의 날짜는 '투자성향 기준일'
+    # (진단일)이지 상품 설명을 한 날이 아니다. 자리를 열어 두면 LLM이 그 날짜를
+    # 설명일로 볼지 말지 회차마다 갈리고, 그 값 하나로 DATE-001이 통과↔위험으로
+    # 뒤집힌다(실측: 실물 진단표 3회 판독 중 2회만 2026-07-24를 설명일로 냈고,
+    # 그 값이 들어가면 계약일보다 늦어 위반 판정이 됐다).
+    # 설명일은 설명확인서에서 받는다.
     "suitability_form": (
-        "customer_profile", "explanation_date", "customer_acknowledgement",
+        "customer_profile", "customer_acknowledgement",
         "staff_name", "principal_loss_explained", "risk_level_explained",
     ),
     "product_description": (
