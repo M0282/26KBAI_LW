@@ -9,3 +9,4 @@ rank_bm25
 chromadb
 
 pytest>=8
+python-docx>=1.1,<2
