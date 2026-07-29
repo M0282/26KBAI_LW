@@ -1,3 +1,5 @@
+# Python 3.10 이상 필요 (개발·검증은 3.12 기준).
+# 3.9는 2025-10 지원 종료(EOL)라 대상에서 제외한다.
 anthropic
 streamlit
 pydantic>=2
