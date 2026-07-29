@@ -163,3 +163,26 @@ def test_recording_check_never_claims_to_verify_audio():
 
     check = check_recording_requirement(_rec_docs("공격투자형", "1등급"))
     assert "음성 파일을 판독하지 않습니다" in (check.suggestion or "")
+
+
+def test_guarantee_claim_survives_connective_hayeo():
+    """'하여·위하여'가 '여' 예외에 걸려 명백한 위반을 놓치던 문제."""
+    from src.verify.financial_rules import find_guarantee_claims
+
+    assert find_guarantee_claims("수익을 보장하여 드립니다.")
+
+
+def test_guarantee_claim_ignores_yeobu_question():
+    """'원금보장 여부'는 중립적 질의지 보장 약속이 아니다."""
+    from src.verify.financial_rules import find_guarantee_claims
+
+    assert not find_guarantee_claims("원금보장 여부를 확인하시기 바랍니다.")
+    # 쪽번호가 낱말 사이에 끼어도 '여부'는 복원된다.
+    assert not find_guarantee_claims("원금보장여 - 168 - 부와 관계없이 손실이 발생할 수 있습니다.")
+
+
+def test_guarantee_claim_still_ignores_proper_disclosure():
+    from src.verify.financial_rules import find_guarantee_claims
+
+    assert not find_guarantee_claims("본 상품은 원금이 보장되지 않으며 전부 손실될 수 있습니다.")
+    assert not find_guarantee_claims("원금보장추구형 구조화 상품")
