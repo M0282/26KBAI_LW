@@ -86,3 +86,22 @@ def test_ai_reasoner_falls_back_without_api_key(monkeypatch):
     issues = build_legal_issues(documents, checks, use_llm=True)
     assert issues["FIT-001"].search_query
     assert issues["FIT-001"].used_llm is False
+
+
+def test_drop_heading_echo_removes_repeated_article_title():
+    """API가 조문 머리말을 본문에 한 번 더 넣어 준다 — 원문 보기에 군더더기로 남는다."""
+    from src.ingest.articles import drop_heading_echo
+
+    fragments = [
+        "① 금융상품직접판매업자는 계약서류를 지체 없이 제공하여야 한다.",
+        "② 다툼이 있는 경우에는 판매업자가 이를 증명하여야 한다.",
+        "제23조(계약서류의 제공의무)",
+    ]
+    assert drop_heading_echo(fragments) == fragments[:2]
+
+
+def test_drop_heading_echo_keeps_article_that_is_only_a_heading():
+    """본문이 머리말뿐인 조문은 지울 것이 아니라 그게 전부다."""
+    from src.ingest.articles import drop_heading_echo
+
+    assert drop_heading_echo(["제6조(삭제)"]) == ["제6조(삭제)"]

@@ -8,7 +8,26 @@ RAG 인덱싱의 입력 단위: 조문 1개 = 청크 1개.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# "제23조(계약서류의 제공의무)" 처럼 조문 머리말만 있는 조각.
+_HEADING_ONLY = re.compile(r"제\d+조(?:의\d+)?\([^)]*\)")
+
+
+def drop_heading_echo(fragments: list[str]) -> list[str]:
+    """제목만 있는 조각을 버린다.
+
+    API가 조문내용(머리말)과 항내용을 함께 주기 때문에 본문에 제목이 한 번
+    더 섞인다(실측: 조문 464건 중 161건에서 본문 끝에 붙었다). 원문 보기에
+    군더더기로 보이고, 제목 토큰이 두 번 세어져 BM25 점수도 흔들린다.
+
+    본문이 머리말 하나뿐인 조문은 그대로 둔다 — 지울 것이 아니라 그게 전부다.
+    """
+    if len(fragments) < 2:
+        return fragments
+    kept = [f for f in fragments if not _HEADING_ONLY.fullmatch(f.strip())]
+    return kept or fragments
 
 
 def _collect_text(node: Any) -> list[str]:
