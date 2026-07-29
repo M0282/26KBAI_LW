@@ -426,7 +426,9 @@ RECORDING_RISK_GRADES = (1, 2)
 
 
 def check_recording_requirement(
-    documents: list[ParsedDocument], elderly_investor: bool = False
+    documents: list[ParsedDocument],
+    elderly_investor: bool = False,
+    profile_min_grade: dict[str, int] | None = None,
 ) -> RuleCheck:
     """녹취 의무 대상 여부를 표시한다.
 
@@ -436,11 +438,17 @@ def check_recording_requirement(
 
     elderly_investor: 만 65세 이상 여부. 우리는 개인정보(생년월일)를 추출하지 않으므로
         화면에서 검토자가 입력한다.
+    profile_min_grade: 적합성 정책표. FIT-001과 **같은 표**를 써야 한다. 예전에는
+        인자를 받지 않아 늘 기본표로 재계산했고, 은행이 정책을 완화하면
+        FIT-001은 '적합'인데 REC-001은 '투자성향 부적합 판매'를 이유로 드는
+        모순이 생겼다(실측: 안정형 고객·5등급 상품, 안정형 최소등급을 4로 완화).
     """
     risks = _documents_with(documents, "product_risk_level")
     grades = [g for _, value in risks if (g := _risk_number(value)) is not None]
     high_risk = [g for g in grades if g in RECORDING_RISK_GRADES]
-    unsuitable = check_suitability(documents).status is CheckStatus.RISK
+    unsuitable = check_suitability(
+        documents, profile_min_grade=profile_min_grade
+    ).status is CheckStatus.RISK
 
     reasons: list[str] = []
     if high_risk:
@@ -588,9 +596,14 @@ def run_package_checks(
         check_dates(documents),
         check_acknowledgement(documents),
     ]
-    product_documents = [document for document in documents if document.doc_type == "product_description"]
     checks.append(check_explanations(documents))
     checks.append(check_unfair_solicitation(documents))
     checks.append(check_document_set(documents))
-    checks.append(check_recording_requirement(documents, elderly_investor=elderly_investor))
+    checks.append(
+        check_recording_requirement(
+            documents,
+            elderly_investor=elderly_investor,
+            profile_min_grade=profile_min_grade,
+        )
+    )
     return checks

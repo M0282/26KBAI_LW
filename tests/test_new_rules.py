@@ -218,3 +218,35 @@ def test_ack_and_doc_rules_agree_on_the_same_value():
     checks = {c.rule_id: c for c in run_package_checks(documents)}
     assert checks["ACK-001"].status == CheckStatus.PASS
     assert checks["DOC-001"].status == CheckStatus.WARNING
+
+
+def test_recording_rule_uses_the_same_policy_table_as_suitability():
+    """REC-001이 정책표를 못 받아 기본표로 재계산하면 FIT-001과 어긋난다."""
+    from src.common.schemas import CheckStatus, ParsedDocument, ParsedField
+    from src.verify.financial_rules import (
+        DEFAULT_PROFILE_MIN_ALLOWED_GRADE,
+        run_package_checks,
+    )
+
+    def build(doc_id, doc_type, **fields):
+        return ParsedDocument(
+            document_id=doc_id, doc_type=doc_type, raw_text="",
+            fields=[ParsedField(name=k, value=v) for k, v in fields.items()],
+        )
+
+    documents = [
+        build("f.pdf", "suitability_form", customer_profile="안정형"),
+        build("p.pdf", "product_description", product_risk_level="5등급"),
+    ]
+    # 은행이 정책을 완화한 경우: 안정형도 4등급까지 가입 가능
+    relaxed = dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE, **{"안정형": 4})
+    checks = {c.rule_id: c for c in run_package_checks(documents, profile_min_grade=relaxed)}
+
+    assert checks["FIT-001"].status == CheckStatus.PASS
+    # FIT이 적합하다고 한 건을 REC가 '부적합 판매'라고 부르면 안 된다.
+    assert "부적합" not in checks["REC-001"].document_excerpt
+
+    # 기본표에서는 부적합이 맞으므로 그 이유가 유지돼야 한다.
+    default_checks = {c.rule_id: c for c in run_package_checks(documents)}
+    assert default_checks["FIT-001"].status == CheckStatus.RISK
+    assert "부적합" in default_checks["REC-001"].document_excerpt
