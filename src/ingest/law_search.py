@@ -223,7 +223,27 @@ def find_legal_basis(
         top_k=top_k,
     )
     merged = _deduplicate([*live, *local], top_k=top_k * 2)
-    return _rank_basis(merged, preferred_articles, focus)[:top_k]
+    ranked = _rank_basis(merged, preferred_articles, focus)
+    return _keep_related(ranked, focus, top_k)
+
+
+def _keep_related(
+    ranked: list[LawSearchResult], focus: Iterable[str], top_k: int
+) -> list[LawSearchResult]:
+    """관련 있는 조문만 남긴다. 개수를 억지로 채우지 않는다.
+
+    규칙당 실제 관련 조문은 1~2개인데 상위 3건을 채우면 나머지가 잡음으로
+    메워진다(실측: 참고2는 25%, 참고3은 8%만 규칙과 연결됐다). 근거가 아닌
+    조문을 '참고 근거'라고 부르면 근거 전체의 신뢰가 떨어진다.
+
+    연결되는 조문이 하나도 없으면 점수 상위 1건은 남긴다 — 근거를 아예
+    비우면 담당자가 확인할 출발점이 사라진다.
+    """
+    pattern = _focus_pattern(focus)
+    if pattern is None:
+        return ranked[:top_k]
+    related = [item for item in ranked if pattern.search(item.text or "")]
+    return (related or ranked[:1])[:top_k]
 
 
 def _rank_basis(

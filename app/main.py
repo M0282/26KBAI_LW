@@ -551,34 +551,32 @@ for check in checks:
         if legal_results:
             hint = LAW_HINTS.get(check.rule_id)
             focus = hint.focus if hint else ()
-            # 규칙과 연결되는 문구가 있는 조문만 '근거'로 내세운다.
-            # 검색은 상위 3건을 데려오지만 실제 관련 조문은 규칙당 1~2개뿐이고,
-            # 나머지는 잡음이다(실측: 참고2는 33%, 참고3은 12%만 연결 문구가 있음).
-            # 관련 없는 조문을 '참고 근거'라고 부르면 근거의 신뢰가 함께 떨어진다.
-            grounded, others = [], []
-            for result in legal_results:
-                target = grounded if focused_law_paragraphs(result.text, focus) else others
-                target.append(result)
-
-            if grounded:
-                label = "근거 조문" if len(grounded) == 1 else f"근거 조문 {len(grounded)}건"
-                st.markdown(f"**{label}** (판정과 직접 연결되는 부분을 표시합니다)")
-            for rank, result in enumerate(grounded, start=1):
+            # 검색 결과는 이미 '이 규칙과 연결되는 조문'만 온다(개수를 채우지 않는다).
+            label = "근거 조문" if len(legal_results) == 1 else f"근거 조문 {len(legal_results)}건"
+            st.markdown(f"**{label}** (판정과 직접 연결되는 부분을 표시합니다)")
+            for rank, result in enumerate(legal_results, start=1):
                 tag = "최우선 근거" if rank == 1 else f"근거 {rank}"
                 st.markdown(f"- `{tag}` **{result.citation}** · {result.title} · 출처 `{result.origin}`")
+                if not result.text:
+                    continue
                 # 조문 전체를 던지면 '그래서 어디가 문제냐'에 답하지 못한다.
                 # 이 규칙이 걸리는 항만 뽑아 문구를 강조해 먼저 보여준다.
                 # (예전에는 앞 700자만 잘라 보여줬는데, 금소법 19조의 설명 확인
                 #  의무는 ②항이라 그 문장이 화면에 아예 나오지 않았다.)
-                st.markdown(
-                    '<div class="kb-law">'
-                    + "".join(
-                        f"<p>{_highlight_law(p, focus)}</p>"
-                        for p in focused_law_paragraphs(result.text, focus)
+                focused = focused_law_paragraphs(result.text, focus)
+                if focused:
+                    st.markdown(
+                        '<div class="kb-law">'
+                        + "".join(f"<p>{_highlight_law(p, focus)}</p>" for p in focused)
+                        + "</div>",
+                        unsafe_allow_html=True,
                     )
-                    + "</div>",
-                    unsafe_allow_html=True,
-                )
+                else:
+                    # 연결되는 조문이 하나도 없을 때만 점수 상위 1건이 여기로 온다.
+                    st.caption(
+                        "이 조문에서 규칙과 직접 연결되는 문구를 찾지 못했습니다 — "
+                        "확인의 출발점으로만 보세요."
+                    )
                 with st.expander(f"{result.citation} 조문 전체 보기"):
                     st.markdown(
                         '<div class="kb-law kb-law-full">'
@@ -589,26 +587,6 @@ for check in checks:
                         + "</div>",
                         unsafe_allow_html=True,
                     )
-
-            if others:
-                with st.expander(
-                    f"그 밖의 검색 결과 {len(others)}건 — 이 판정과 직접 연결되는 문구는 없습니다"
-                ):
-                    st.caption(
-                        "검색이 데려온 조문입니다. 판정 근거가 아니며, 배경 확인용으로만 보세요."
-                    )
-                    for result in others:
-                        st.markdown(f"- **{result.citation}** · {result.title} · 출처 `{result.origin}`")
-                        if result.text:
-                            st.markdown(
-                                '<div class="kb-law kb-law-full">'
-                                + "".join(
-                                    f"<p>{html.escape(p)}</p>"
-                                    for p in split_law_paragraphs(result.text)[:3]
-                                )
-                                + "</div>",
-                                unsafe_allow_html=True,
-                            )
         else:
             st.warning("법령 청크가 없습니다. `python -m src.ingest.fetch_regulations` 실행 또는 LAW_API_OC 설정이 필요합니다.")
 

@@ -190,3 +190,32 @@ def test_ranking_without_focus_keeps_score_order():
     a = LawSearchResult("법", "law", "23", "가", "본문 가", 9.0)
     b = LawSearchResult("규정", "admrule", "23", "나", "본문 나", 3.0)
     assert [r.title for r in _rank_basis([a, b], ("23",), ())] == ["가", "나"]
+
+
+def test_related_articles_only_no_forced_count():
+    """개수를 채우려고 관련 없는 조문을 끼워 넣지 않는다."""
+    from src.ingest.law_search import LawSearchResult, _keep_related
+
+    hit = LawSearchResult("법", "law", "23", "계약서류의 제공의무",
+                          "계약서류를 금융소비자에게 지체 없이 제공하여야 한다.", 9.0)
+    miss = LawSearchResult("규정", "admrule", "23", "중개업자의 고지의무",
+                           "중개업자는 고지의무를 이행해야 한다.", 8.0)
+    focus = ("계약서류를 금융소비자에게 지체 없이 제공",)
+    assert _keep_related([hit, miss], focus, 3) == [hit]
+
+
+def test_keeps_one_article_when_nothing_matches():
+    """연결되는 조문이 없어도 확인의 출발점 1건은 남긴다."""
+    from src.ingest.law_search import LawSearchResult, _keep_related
+
+    a = LawSearchResult("법", "law", "1", "가", "관련 없는 본문", 9.0)
+    b = LawSearchResult("법", "law", "2", "나", "역시 관련 없음", 8.0)
+    assert _keep_related([a, b], ("있을 수 없는 문구",), 3) == [a]
+
+
+def test_no_focus_keeps_previous_behaviour():
+    from src.ingest.law_search import LawSearchResult, _keep_related
+
+    a = LawSearchResult("법", "law", "1", "가", "본문", 9.0)
+    b = LawSearchResult("법", "law", "2", "나", "본문", 8.0)
+    assert _keep_related([a, b], (), 2) == [a, b]
