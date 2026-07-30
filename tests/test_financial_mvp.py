@@ -258,3 +258,75 @@ def test_short_single_word_match_is_not_grounding():
                              "설명의무", "위험등급을 정하는 경우에 지켜야 한다.", 8.0)
     kept = _keep_related([weak, strong], ("녹취", "위험등급을 정하는 경우"), 3)
     assert [r.article_no for r in kept] == ["12"]
+
+
+def test_every_law_hint_phrase_exists_in_the_corpus():
+    """문구가 코퍼스에 없으면 근거가 조용히 비어 버린다.
+
+    화면에는 오류가 아니라 '연결되는 문구를 찾지 못했다'로 뜨기 때문에
+    오타나 조문 개정을 알아채기 어렵다. 실측 — 법령이 낱말 사이에 괄호
+    정의문을 끼워 넣어서('위험등급(이하 "위험등급"이라 한다)에 관한 정보와
+    비교하여 평가할 것') 눈으로 읽고 적은 문구 2건이 죽어 있었다.
+    """
+    from src.ingest.law_search import is_repealed, load_article_chunks
+    from src.verify.financial_rules import LAW_HINTS, focus_pattern
+
+    scope = ("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정")
+    chunks = [
+        c for c in load_article_chunks()
+        if not is_repealed(c) and c.get("source") in scope
+    ]
+    if not chunks:  # 코퍼스가 없는 환경에서는 검사할 것이 없다
+        return
+
+    dead = []
+    for rule, hint in LAW_HINTS.items():
+        for phrase in (*hint.focus, *hint.anchor):
+            pattern = focus_pattern((phrase,))
+            if not any(pattern.search(c.get("text") or "") for c in chunks):
+                dead.append(f"{rule}: {phrase!r}")
+    assert not dead, "코퍼스에 없는 문구: " + ", ".join(dead)
+
+
+def test_declared_basis_does_not_depend_on_the_search_query():
+    """근거 조문은 검색어와 무관해야 한다.
+
+    앱은 LLM이 만든 검색어를 쓴다. 검색으로 근거를 고르면 같은 서류·같은
+    판정인데 근거가 흔들린다(실측: 8종 중 5종. '확정수익 표현 검사' 질의에서
+    부당권유 판정의 최우선 근거가 제21조 대신 제19조가 됐다).
+    """
+    from src.ingest.law_search import load_article_chunks
+    from src.verify.financial_rules import LAW_HINTS
+
+    if not load_article_chunks():  # 코퍼스가 없는 환경
+        return
+
+    from src.ingest.law_search import find_legal_basis
+
+    for rule, hint in LAW_HINTS.items():
+        seen = set()
+        for query in (hint.query, "전혀 다른 질의 광고 시 금지행위", "계약서류 전자우편"):
+            results = find_legal_basis(
+                query, preferred_articles=hint.preferred_articles,
+                preferred_sources=hint.preferred_sources, top_k=3,
+                allow_live=False, focus=hint.grounding, basis=hint.basis,
+            )
+            seen.add(tuple(r.citation for r in results))
+        assert len(seen) == 1, f"{rule}: 검색어에 따라 근거가 달라진다 {seen}"
+
+
+def test_every_declared_basis_article_exists_and_is_highlightable():
+    """선언한 근거 조문이 코퍼스에 있고, 강조할 문구가 그 안에 있어야 한다."""
+    from src.ingest.law_search import fetch_declared_basis, load_article_chunks
+    from src.verify.financial_rules import LAW_HINTS, focused_law_paragraphs
+
+    if not load_article_chunks():
+        return
+
+    for rule, hint in LAW_HINTS.items():
+        results = fetch_declared_basis(hint.basis, allow_live=False)
+        assert len(results) == len(hint.basis), f"{rule}: 선언한 조문을 찾지 못했다"
+        for result in results:
+            assert focused_law_paragraphs(result.text, hint.focus), (
+                f"{rule}: {result.citation} 에 강조할 문구가 없다"
+            )

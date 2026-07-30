@@ -274,10 +274,10 @@ def verify_package(document_payloads: tuple[str, ...], with_llm: bool, elderly: 
 
 @st.cache_data(show_spinner=False, max_entries=64)
 def legal_basis(query: str, articles: tuple[str, ...], sources: tuple[str, ...], live: bool,
-                focus: tuple[str, ...] = ()):
+                focus: tuple[str, ...] = (), basis: tuple[tuple[str, str], ...] = ()):
     return find_legal_basis(
         query, preferred_articles=articles, preferred_sources=sources,
-        top_k=3, allow_live=live, focus=focus,
+        top_k=3, allow_live=live, focus=focus, basis=basis,
     )
 
 
@@ -541,7 +541,7 @@ for check in checks:
         hint = LAW_HINTS[check.rule_id]
         legal_results = legal_basis(
             issue.search_query, hint.preferred_articles, hint.preferred_sources, live_law,
-            focus=hint.grounding,
+            focus=hint.grounding, basis=hint.basis,
         )
         # 근거 조문을 판정 객체에 실어둔다. 화면에서만 존재하면 결과를 내보내는 순간
         # 근거가 사라진다(스키마가 evidence_clause를 약속해두고 아무도 채우지 않았다).

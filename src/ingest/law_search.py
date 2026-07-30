@@ -198,6 +198,56 @@ def search_live_laws(
     )
 
 
+def fetch_declared_basis(
+    basis: Iterable[tuple[str, str]], allow_live: bool = True
+) -> list[LawSearchResult]:
+    """선언된 (법령, 조문번호)를 그 순서대로 가져온다.
+
+    근거 조문은 규칙마다 확정돼 있으므로 검색할 필요가 없다. 검색에 맡기면
+    검색어가 바뀔 때마다 근거가 흔들린다 — 앱은 LLM이 만든 검색어를 쓰므로
+    같은 서류·같은 판정인데 근거가 달라졌다(실측: 8종 중 5종).
+
+    최신 원문 보강이 켜져 있으면 국가법령정보 API 본문을 우선한다(조문이
+    개정됐을 때 로컬 코퍼스는 옛 텍스트를 갖고 있다).
+    """
+    pairs = [(str(source), str(article)) for source, article in basis]
+    if not pairs:
+        return []
+
+    local = {
+        (str(c.get("source")), str(c.get("article_no"))): c
+        for c in load_article_chunks()
+    }
+    live: dict[tuple[str, str], dict] = {}
+    if allow_live:
+        for source in dict.fromkeys(source for source, _ in pairs):
+            try:
+                for chunk in _fetch_live_source(source):
+                    live[(str(chunk.get("source")), str(chunk.get("article_no")))] = chunk
+            except (LawApiError, OSError, ValueError, KeyError):
+                continue
+
+    results: list[LawSearchResult] = []
+    for key in pairs:
+        chunk = live.get(key) or local.get(key)
+        if not chunk or is_repealed(chunk):
+            # 선언한 조문이 코퍼스에 없거나 폐지됐다면 조용히 넘기지 않는다 —
+            # 화면에 근거가 하나 줄어드는 것으로 드러난다.
+            continue
+        results.append(
+            LawSearchResult(
+                source=str(chunk.get("source", "")),
+                source_type=str(chunk.get("source_type", "")),
+                article_no=str(chunk.get("article_no", "")),
+                title=str(chunk.get("title", "")),
+                text=str(chunk.get("text", "")),
+                score=0.0,
+                origin="law.go.kr" if key in live else "local",
+            )
+        )
+    return results
+
+
 def _deduplicate(results: Iterable[LawSearchResult], top_k: int) -> list[LawSearchResult]:
     selected: dict[tuple[str, str], LawSearchResult] = {}
     for result in results:
@@ -215,6 +265,7 @@ def find_legal_basis(
     top_k: int = 3,
     allow_live: bool = True,
     focus: Iterable[str] = (),
+    basis: Iterable[tuple[str, str]] = (),
 ) -> list[LawSearchResult]:
     """근거 조문 후보를 순위대로 돌려준다.
 
@@ -226,6 +277,12 @@ def find_legal_basis(
         못했다'고 함께 뜨는 자기모순이었다).
         그 규칙과 실제로 연결되는 문구가 있는 조문을 먼저 둔다.
     """
+    # 근거 조문이 선언돼 있으면 그것을 그대로 쓴다. 검색어와 무관하게 항상
+    # 같은 근거가 같은 순서로 나온다.
+    declared = fetch_declared_basis(basis, allow_live=allow_live)
+    if declared:
+        return declared[:top_k]
+
     # 후보를 넉넉히 모은 뒤 관련 있는 것만 남긴다. 처음부터 top_k 로 자르면
     # 점수가 낮아도 규칙과 연결되는 조문이 후보에 들지 못한다(실측: 감독규정
     # 제13조(설명서)가 설명의무 판정의 근거인데 점수에 밀려 아예 빠졌다).
