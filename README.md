@@ -74,7 +74,7 @@ src/common/    공용 스키마 = 모듈 간 인터페이스 계약 (변경 시 
 app/main.py    Streamlit 검증 화면
 data/          샘플 서류·법령 조문 (민감/대용량 데이터 커밋 금지)
 scripts/       데모 생성·검증 하니스·감사·기술설명서 생성
-tests/         회귀 테스트 45건
+tests/         회귀 테스트 83건
 docs/          계획 문서 · 기술설명서(PPTX)
 ```
 
