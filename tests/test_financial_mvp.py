@@ -154,3 +154,39 @@ def test_repealed_articles_are_never_offered_as_legal_basis():
     results = search_local_laws("삭제된 조항 경영지도기준", chunks=chunks, top_k=5)
     assert all(not r.text.strip().endswith("삭제") for r in results)
     assert {r.article_no for r in results} <= {"18"}
+
+
+def test_top_basis_prefers_the_article_that_actually_contains_the_clause():
+    """조문 번호가 같아도 법률과 감독규정은 내용이 전혀 다르다.
+
+    실측: DOC-001의 최우선 근거로 금소법 제23조(계약서류의 제공의무) 대신
+    감독규정 제23조(중개업자의 고지의무)가 떴다. 화면에는 '최우선 근거'라면서
+    '연결되는 문구를 찾지 못했다'가 함께 뜨는 자기모순이었다.
+    """
+    from src.ingest.law_search import search_chunks, _rank_basis
+
+    chunks = [
+        {"source": "금융소비자 보호에 관한 감독규정", "source_type": "admrule",
+         "article_no": "23", "title": "금융상품판매대리ㆍ중개업자의 고지의무",
+         "text": "영 제24조제1항제4호에서 금융위원회가 정하여 고시하는 사항이란 "
+                 "중개업자의 고지의무에 관한 사항을 말한다."},
+        {"source": "금융소비자 보호에 관한 법률", "source_type": "law",
+         "article_no": "23", "title": "계약서류의 제공의무",
+         "text": "① 금융상품직접판매업자는 계약을 체결하는 경우 "
+                 "계약서류를 금융소비자에게 지체 없이 제공하여야 한다."},
+    ]
+    focus = ("계약서류를 금융소비자에게 지체 없이 제공", "증명하여야 한다")
+    found = search_chunks("중개업자 고지의무", chunks,
+                          preferred_articles=("23",), top_k=2)
+    ranked = _rank_basis(found, ("23",), focus)
+    assert ranked[0].source == "금융소비자 보호에 관한 법률"
+    assert ranked[0].title == "계약서류의 제공의무"
+
+
+def test_ranking_without_focus_keeps_score_order():
+    """focus 를 주지 않으면 종전처럼 지정 조문·점수 순서를 유지한다."""
+    from src.ingest.law_search import LawSearchResult, _rank_basis
+
+    a = LawSearchResult("법", "law", "23", "가", "본문 가", 9.0)
+    b = LawSearchResult("규정", "admrule", "23", "나", "본문 나", 3.0)
+    assert [r.title for r in _rank_basis([a, b], ("23",), ())] == ["가", "나"]

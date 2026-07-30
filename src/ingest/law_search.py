@@ -188,7 +188,18 @@ def find_legal_basis(
     preferred_sources: Iterable[str] = (),
     top_k: int = 3,
     allow_live: bool = True,
+    focus: Iterable[str] = (),
 ) -> list[LawSearchResult]:
+    """근거 조문 후보를 순위대로 돌려준다.
+
+    focus: 이 규칙이 조문 안에서 걸리는 문구. 조문 번호가 같아도 법률과
+        감독규정은 내용이 전혀 다르므로, 번호만으로 최우선을 정하면 엉뚱한
+        조문이 올라온다(실측: DOC-001의 최우선 근거로 금소법 제23조
+        '계약서류의 제공의무' 대신 감독규정 제23조 '중개업자의 고지의무'가
+        표시됐다 — 화면에는 '최우선 근거'라면서 '연결되는 문구를 찾지
+        못했다'고 함께 뜨는 자기모순이었다).
+        그 규칙과 실제로 연결되는 문구가 있는 조문을 먼저 둔다.
+    """
     local = search_local_laws(
         query,
         preferred_articles=preferred_articles,
@@ -204,9 +215,39 @@ def find_legal_basis(
         top_k=top_k,
     )
     merged = _deduplicate([*live, *local], top_k=top_k * 2)
-    # 라이브 결과를 앞에 붙이면 큐레이션한 근거 조문이 밀린다(실측: 녹취 의무의
-    # 최우선 근거가 28조 대신 18조로 표시됨). 병합 후에도 지정 조문을 먼저 둔다.
+    return _rank_basis(merged, preferred_articles, focus)[:top_k]
+
+
+def _rank_basis(
+    results: list[LawSearchResult],
+    preferred_articles: Iterable[str],
+    focus: Iterable[str],
+) -> list[LawSearchResult]:
+    """근거 조문 순위: 규칙과 연결되는 문구가 있는 것 → 지정 조문 → 점수.
+
+    라이브 결과를 앞에 붙이면 큐레이션한 근거가 밀린다(실측: 녹취 의무의
+    최우선 근거가 28조 대신 18조로 표시됨). 그래서 병합 뒤 다시 정렬한다.
+    """
     article_set = {str(value) for value in preferred_articles}
-    if article_set:
-        merged.sort(key=lambda item: item.article_no not in article_set)
-    return merged[:top_k]
+    pattern = _focus_pattern(focus)
+    # 정렬은 안정적이므로 점수 순서는 같은 등급 안에서 보존된다.
+    return sorted(
+        results,
+        key=lambda item: (
+            not (pattern.search(item.text or "") if pattern else False),
+            item.article_no not in article_set if article_set else False,
+        ),
+    )
+
+
+def _focus_pattern(focus: Iterable[str]) -> "re.Pattern[str] | None":
+    """조문 안에서 규칙이 걸리는 문구를 찾는 정규식(글자 사이 공백 허용).
+
+    조문 원문은 줄바꿈이 낱말 한가운데를 자르는 경우가 있다.
+    """
+    alternatives = [
+        r"\s*".join(re.escape(ch) for ch in phrase if not ch.isspace())
+        for phrase in focus
+        if phrase and phrase.strip()
+    ]
+    return re.compile("|".join(alternatives)) if alternatives else None
