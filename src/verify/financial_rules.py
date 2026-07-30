@@ -31,7 +31,9 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         # 조문 힌트가 없으면 BM25가 정의·유형 조문(제2·3·4조)을 상위로 올려 근거가 겉돈다.
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률",),
-        focus=("중요한 사항", "이해할 수 있도록 설명"),
+        # '중요한 사항'은 조문 여러 목에 흩어져 있어 강조가 번진다. 상품 동일성의
+        # 근거는 '무엇에 대해 설명해야 하는가'를 규정한 의무 문장이다.
+        focus=("이해할 수 있도록 설명",),
     ),
     "FIT-001": RuleLawHint(
         "일반금융소비자 투자성향 고위험 금융상품 적합성 원칙",
@@ -43,7 +45,11 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         "금융상품 중요사항 설명의무 원금손실 수수료 위험",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
-        focus=("이해할 수 있도록 설명", "중요한 사항", "위험등급", "수수료"),
+        # '중요한 사항'·'수수료'는 보장성·예금성·대출성 목에도 나와서 이 도구가
+        # 다루지 않는 상품의 설명 항목까지 강조된다(실측: 보장성 상품 목이 섞였다).
+        # 투자성 상품 목(나.)에만 있는 표현으로 좁힌다.
+        focus=("이해할 수 있도록 설명", "투자성 상품의 내용", "투자에 따른 위험",
+            "정하는 위험등급", "부담해야 하는 수수료"),
     ),
     "DATE-001": RuleLawHint(
         "금융상품 계약 체결 전 설명의무 설명 시점",
@@ -117,6 +123,45 @@ def focus_pattern(focus: Iterable[str]) -> re.Pattern[str] | None:
     return re.compile("|".join(alternatives)) if alternatives else None
 
 
+# 항 아래 단위: 호(1.) → 목(가.) → 세목(1)).
+_LAW_ITEM = re.compile(r"(?:(?<=\s)|(?<=^))(?:\d{1,2}\.|[가-하]\.|\d{1,2}\))\s")
+# 항이 이보다 짧으면 더 쪼개지 않는다. 문맥이 끊기는 손해가 더 크다.
+_NARROW_THRESHOLD = 400
+
+
+def narrow_to_items(paragraph: str, pattern: re.Pattern[str] | None) -> str:
+    """긴 항을 호·목 단위로 좁힌다. 의무를 규정한 머리 문장은 남긴다.
+
+    금소법 19조 ①항은 1,300자가 넘는다 — 보장성·투자성·예금성·대출성 상품의
+    설명 항목을 모두 나열하기 때문이다. 이 도구는 투자성 상품만 다루는데
+    보험료·대출금리까지 강조해 보여주면 '어디가 문제냐'에 다시 답하지 못한다.
+
+    머리 문장("…설명하여야 한다")은 의무의 근거라 항상 남기고, 그 아래 나열
+    항목은 규칙과 연결되는 것만 남긴다.
+    """
+    if pattern is None or len(paragraph) <= _NARROW_THRESHOLD:
+        return paragraph
+
+    marks = list(_LAW_ITEM.finditer(paragraph))
+    if not marks:
+        return paragraph
+
+    head = paragraph[: marks[0].start()].strip()
+    items = []
+    for index, mark in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(paragraph)
+        items.append(paragraph[mark.start():end].strip())
+
+    kept = [item for item in items if pattern.search(item)]
+    if head and pattern.search(head) and not kept:
+        # 의무 문장에만 걸리는 규칙이 있다(설명 시점·적합성 판단). 이때 나열
+        # 항목까지 붙이면 다시 벽이 된다 — 머리 문장만으로 근거가 충분하다.
+        return head
+    if not kept:
+        return paragraph
+    return "\n".join([head, *kept]) if head else "\n".join(kept)
+
+
 def focused_law_paragraphs(text: str, focus: Iterable[str]) -> list[str]:
     """조문에서 이 규칙이 걸리는 항만 돌려준다.
 
@@ -127,7 +172,11 @@ def focused_law_paragraphs(text: str, focus: Iterable[str]) -> list[str]:
     pattern = focus_pattern(focus)
     if not pattern:
         return []
-    return [p for p in split_law_paragraphs(text) if pattern.search(p)]
+    return [
+        narrow_to_items(p, pattern)
+        for p in split_law_paragraphs(text)
+        if pattern.search(p)
+    ]
 
 
 # 금소법 21조: 투자성 상품에 '손실이 없다'는 단정적 판단을 제공하는 것은 금지된다.

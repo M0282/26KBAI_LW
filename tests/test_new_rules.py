@@ -336,3 +336,47 @@ def test_paragraph_split_keeps_every_clause():
     assert [p[0] for p in parts] == ["①", "②", "③"]
     # 항 기호가 없는 조문은 통째로 한 덩이다(21조는 호로만 나뉜다).
     assert split_law_paragraphs("1. 불확실한 사항에 대하여") == ["1. 불확실한 사항에 대하여"]
+
+
+def test_long_paragraph_is_narrowed_to_the_matching_items():
+    """금소법 19조 ①항은 네 가지 상품의 설명 항목을 다 나열해 1,300자가 넘는다.
+
+    이 도구는 투자성 상품만 다루므로 보험료·대출금리까지 강조하면 다시 벽이 된다.
+    """
+    from src.verify.financial_rules import focus_pattern, narrow_to_items
+
+    paragraph = (
+        "① 판매업자는 중요한 사항을 이해할 수 있도록 설명하여야 한다. "
+        + "1. 다음 각 목의 구분에 따른 사항 "
+        + "가. 보장성 상품 1) 보험료 2) 보험금 지급제한 사유 " + "가" * 200 + " "
+        + "나. 투자성 상품 1) 투자성 상품의 내용 2) 투자에 따른 위험 "
+        + "다. 예금성 상품 1) 이자율 " + "다" * 200
+    )
+    pattern = focus_pattern(("투자에 따른 위험",))
+    narrowed = narrow_to_items(paragraph, pattern)
+    assert "투자에 따른 위험" in narrowed
+    assert "보험료" not in narrowed
+    assert "이자율" not in narrowed
+    # 의무를 규정한 머리 문장은 남는다.
+    assert narrowed.startswith("① 판매업자는")
+
+
+def test_obligation_sentence_only_when_focus_matches_the_head():
+    """설명 시점처럼 의무 문장에만 걸리는 규칙은 그 문장만 보여준다."""
+    from src.verify.financial_rules import focus_pattern, narrow_to_items
+
+    paragraph = (
+        "① 판매업자는 계약 체결을 권유하는 경우 설명하여야 한다. "
+        + "1. 첫째 항목 " + "가" * 250 + " 2. 둘째 항목 " + "나" * 250
+    )
+    narrowed = narrow_to_items(paragraph, focus_pattern(("계약 체결을 권유",)))
+    assert narrowed.endswith("설명하여야 한다.")
+    assert "첫째 항목" not in narrowed
+
+
+def test_short_paragraph_is_left_alone():
+    """짧은 항은 더 쪼개지 않는다 — 문맥이 끊기는 손해가 더 크다."""
+    from src.verify.financial_rules import focus_pattern, narrow_to_items
+
+    paragraph = "② 판매업자는 1. 자료를 기록하고 2. 유지하여야 한다."
+    assert narrow_to_items(paragraph, focus_pattern(("자료를 기록",))) == paragraph
