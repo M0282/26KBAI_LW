@@ -69,6 +69,21 @@ def is_repealed(chunk: dict) -> bool:
     return bool(_REPEALED.fullmatch((chunk.get("text") or "").strip()))
 
 
+# 제재·벌칙 조문. 위반의 '결과'를 정한 것이라 의무의 근거가 아니다.
+# 실측: 설명일 판정(DATE-001)의 근거로 금소법 제69조(과태료)가 떴다 —
+# 과태료 조문에 '계약 체결을 권유'라는 표현이 인용돼 있다는 이유뿐이었다.
+# 근거 조문으로 제재 규정을 내밀면 담당자는 무엇을 확인해야 할지 알 수 없다.
+_SANCTION_TITLE = re.compile(
+    r"(과태료|과징금|벌칙|양벌규정|이의신청|결손처분|체납처분"
+    r"|에 대한 제재|처분 등|의 부과|의 징수)"
+)
+
+
+def is_sanction(chunk: dict) -> bool:
+    """제재·벌칙 조문인지(근거로 제시하지 않는다)."""
+    return bool(_SANCTION_TITLE.search((chunk.get("title") or "").strip()))
+
+
 def search_chunks(
     query: str,
     chunks: Iterable[dict],
@@ -81,7 +96,10 @@ def search_chunks(
     # 실행 중 검색어는 LLM이 자유 형식으로 만들기 때문에, 규칙에 박아 둔 질의로만
     # 확인해서는 안전하다고 할 수 없다 — 실제로 '삭제된 조항' 질의에서
     # 은행업감독규정 제16조(삭제)가 상위 5건에 들어왔다.
-    corpus = [chunk for chunk in chunks if not is_repealed(chunk)]
+    corpus = [
+        chunk for chunk in chunks
+        if not is_repealed(chunk) and not is_sanction(chunk)
+    ]
     scores = _score_chunks(query, corpus)
     article_set = {str(value) for value in preferred_articles}
     source_list = [str(value) for value in preferred_sources]
@@ -208,27 +226,41 @@ def find_legal_basis(
         못했다'고 함께 뜨는 자기모순이었다).
         그 규칙과 실제로 연결되는 문구가 있는 조문을 먼저 둔다.
     """
+    # 후보를 넉넉히 모은 뒤 관련 있는 것만 남긴다. 처음부터 top_k 로 자르면
+    # 점수가 낮아도 규칙과 연결되는 조문이 후보에 들지 못한다(실측: 감독규정
+    # 제13조(설명서)가 설명의무 판정의 근거인데 점수에 밀려 아예 빠졌다).
+    pool = max(top_k * 4, 12)
     local = search_local_laws(
         query,
         preferred_articles=preferred_articles,
         preferred_sources=preferred_sources,
-        top_k=top_k,
+        top_k=pool,
     )
     if not allow_live:
-        return local
+        return _keep_related(
+            _rank_basis(local, preferred_articles, focus), focus, top_k,
+            preferred_sources=preferred_sources, preferred_articles=preferred_articles,
+        )
     live = search_live_laws(
         query,
         preferred_articles=preferred_articles,
         preferred_sources=preferred_sources,
-        top_k=top_k,
+        top_k=pool,
     )
-    merged = _deduplicate([*live, *local], top_k=top_k * 2)
+    merged = _deduplicate([*live, *local], top_k=pool * 2)
     ranked = _rank_basis(merged, preferred_articles, focus)
-    return _keep_related(ranked, focus, top_k)
+    return _keep_related(
+        ranked, focus, top_k,
+        preferred_sources=preferred_sources, preferred_articles=preferred_articles,
+    )
 
 
 def _keep_related(
-    ranked: list[LawSearchResult], focus: Iterable[str], top_k: int
+    ranked: list[LawSearchResult],
+    focus: Iterable[str],
+    top_k: int,
+    preferred_sources: Iterable[str] = (),
+    preferred_articles: Iterable[str] = (),
 ) -> list[LawSearchResult]:
     """관련 있는 조문만 남긴다. 개수를 억지로 채우지 않는다.
 
@@ -239,11 +271,45 @@ def _keep_related(
     연결되는 조문이 하나도 없으면 점수 상위 1건은 남긴다 — 근거를 아예
     비우면 담당자가 확인할 출발점이 사라진다.
     """
+    # 규칙이 지정한 법령 안에서만 근거를 찾는다. 코퍼스에는 은행법·은행업감독규정도
+    # 있어서(다른 규칙을 위한 것) 문구가 우연히 걸리면 금소법 판정의 근거로
+    # 올라온다 — 실측: 설명 시점 판정에 은행업감독규정 제89조(금융거래조건의
+    # 공시 및 설명)가 '설명하여야 한다' 한 마디로 근거가 됐다.
+    source_list = [str(value) for value in preferred_sources]
+    source_set = set(source_list)
+    article_set = {str(value) for value in preferred_articles}
+    if source_set:
+        ranked = [item for item in ranked if item.source in source_set]
+    # 법률 근거는 규칙마다 손으로 확정해 두었다(금소법 17·19·21·23·28조).
+    # 주 출처에서는 그 조문만 허용한다 — '계약 체결을 권유'·'서명' 같은 표현은
+    # 금소법 전반에 흔해서, 문구만으로 고르면 다른 원칙의 조문이 근거로 올라온다
+    # (실측: 설명 시점 판정에 제17조 적합성원칙·제21조의2 방문판매 준수사항이 떴다).
+    # 감독규정은 그 법률 조문을 구체화하는 것이라 번호가 다르므로 문구로 연결한다.
+    if article_set and source_list:
+        primary = source_list[0]
+        ranked = [
+            item for item in ranked
+            if item.source != primary or str(item.article_no) in article_set
+        ]
     pattern = _focus_pattern(focus)
     if pattern is None:
         return ranked[:top_k]
-    related = [item for item in ranked if pattern.search(item.text or "")]
+    related = [item for item in ranked if _is_grounded(item.text or "", pattern)]
     return (related or ranked[:1])[:top_k]
+
+
+# 짧은 낱말 하나만 걸린 것은 우연으로 본다. '녹취' 두 글자는 금소법 여러 조문에
+# 나오는데, 그 한 마디로 근거를 삼으면 관계없는 조문이 올라온다(실측: 설명 확인
+# 판정에 감독규정 제22조 '중개업자의 금지행위'가 '녹취' 하나로 근거가 됐다).
+_MIN_GROUNDING_LENGTH = 4
+
+
+def _is_grounded(text: str, pattern: "re.Pattern[str]") -> bool:
+    """근거로 삼을 만큼 규칙과 연결되는가."""
+    return any(
+        len(re.sub(r"\s+", "", match.group(0))) >= _MIN_GROUNDING_LENGTH
+        for match in pattern.finditer(text)
+    )
 
 
 def _rank_basis(

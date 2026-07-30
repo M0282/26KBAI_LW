@@ -219,3 +219,42 @@ def test_no_focus_keeps_previous_behaviour():
     a = LawSearchResult("법", "law", "1", "가", "본문", 9.0)
     b = LawSearchResult("법", "law", "2", "나", "본문", 8.0)
     assert _keep_related([a, b], (), 2) == [a, b]
+
+
+def test_sanction_articles_are_not_offered_as_basis():
+    """과태료·벌칙은 위반의 결과다. 의무의 근거로 내밀면 안 된다."""
+    from src.ingest.law_search import is_sanction
+
+    assert is_sanction({"title": "과태료"}) is True
+    assert is_sanction({"title": "벌칙"}) is True
+    assert is_sanction({"title": "과징금의 부과"}) is True
+    assert is_sanction({"title": "금융상품판매업자등에 대한 처분 등"}) is True
+    assert is_sanction({"title": "설명의무"}) is False
+    assert is_sanction({"title": "계약서류의 제공의무"}) is False
+
+
+def test_primary_source_is_limited_to_declared_articles():
+    """법률 근거는 규칙마다 확정해 두었다. 흔한 표현으로 다른 조문이 끼면 안 된다."""
+    from src.ingest.law_search import LawSearchResult, _keep_related
+
+    declared = LawSearchResult("금융소비자 보호에 관한 법률", "law", "19", "설명의무",
+                               "설명한 내용을 이해하였음을 확인을 받아야 한다.", 9.0)
+    other = LawSearchResult("금융소비자 보호에 관한 법률", "law", "17", "적합성원칙",
+                            "정보를 파악하고 이해하였음을 확인을 받아야 한다.", 9.5)
+    kept = _keep_related(
+        [other, declared], ("이해하였음을",), 3,
+        preferred_sources=("금융소비자 보호에 관한 법률",), preferred_articles=("19",),
+    )
+    assert [r.article_no for r in kept] == ["19"]
+
+
+def test_short_single_word_match_is_not_grounding():
+    """'녹취' 두 글자는 여러 조문에 나온다 — 그 한 마디로 근거를 삼지 않는다."""
+    from src.ingest.law_search import LawSearchResult, _keep_related
+
+    weak = LawSearchResult("금융소비자 보호에 관한 감독규정", "admrule", "14",
+                           "불공정영업행위의 금지", "녹취 방법을 준용한다.", 9.0)
+    strong = LawSearchResult("금융소비자 보호에 관한 감독규정", "admrule", "12",
+                             "설명의무", "위험등급을 정하는 경우에 지켜야 한다.", 8.0)
+    kept = _keep_related([weak, strong], ("녹취", "위험등급을 정하는 경우"), 3)
+    assert [r.article_no for r in kept] == ["12"]
