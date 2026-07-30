@@ -545,9 +545,18 @@ for check in checks:
         )
         # 근거 조문을 판정 객체에 실어둔다. 화면에서만 존재하면 결과를 내보내는 순간
         # 근거가 사라진다(스키마가 evidence_clause를 약속해두고 아무도 채우지 않았다).
+        #
+        # 담는 것은 '규칙이 걸리는 항'이다. 예전에는 조문 앞 700자를 잘라 넣었는데,
+        # 금소법 19조는 ①항(상품 유형별 설명 항목)만으로 700자를 넘어서 정작
+        # 설명 확인 의무(②항)가 기록에서 빠졌다(실측). 내보내기 파일은 사후
+        # 입증에 쓰는 기록이라 화면과 같은 근거가 담겨야 한다.
         if legal_results:
             check.evidence_clause = legal_results[0].citation
-            check.evidence_text = legal_results[0].text[:700]
+            focused_basis = focused_law_paragraphs(legal_results[0].text, hint.focus)
+            check.evidence_text = (
+                "\n".join(focused_basis) if focused_basis
+                else legal_results[0].text[:700]
+            )
         if legal_results:
             hint = LAW_HINTS.get(check.rule_id)
             focus = hint.focus if hint else ()
