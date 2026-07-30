@@ -347,9 +347,10 @@ def build() -> Path:
         box.line.color.rgb = LINE
         _para(box.text_frame, step, size=12, color=INK, first=True, align=PP_ALIGN.CENTER, space_after=0)
     frame = _textbox(s, Inches(0.62), Inches(2.68), Inches(12.1), Inches(0.9))
+    # 한 줄에 들어가야 한다 — 넘치면 마지막 글자만 다음 줄로 떨어져 지저분해진다.
     _para(frame, "· 건수가 쌓이면 육안 대조에서 누락이 생깁니다   "
-                 "· 컴플라이언스는 표본만 봅니다 — 전건 확인이 불가능합니다   "
-                 "· 문제를 발견해도 이미 계약이 끝난 뒤입니다",
+                 "· 컴플라이언스는 표본만 봅니다   "
+                 "· 발견해도 이미 계약이 끝난 뒤입니다",
           size=12, color=RISK, first=True, space_after=0)
 
     frame = _textbox(s, Inches(0.62), Inches(3.7), Inches(12.1), Inches(0.4))
@@ -366,7 +367,7 @@ def build() -> Path:
 
     _card(s, Inches(0.62), Inches(5.05), Inches(3.85), Inches(1.65),
           "표본 점검 → 전건 점검",
-          ["사람이 못 보던 건까지 기계가 일관되게 확인",
+          ["사람이 놓치던 건까지 일관되게 확인",
            "누락 없이 모든 판매 건에 같은 기준 적용"], accent=OK)
     _card(s, Inches(4.72), Inches(5.05), Inches(3.85), Inches(1.65),
           "사후 적발 → 사전 예방",
