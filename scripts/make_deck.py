@@ -184,7 +184,7 @@ def build() -> Path:
           size=18, bold=True, color=KB_GRAY, first=True, space_after=14)
     _para(frame, "적합성 진단표의 '안정형'과 상품설명서의 '1등급'은 각각 보면 정상입니다. "
                  "두 서류를 맞대어야 비로소 부적합 판매가 보입니다.", size=14, color=INK, space_after=20)
-    _para(frame, "제8회 KB Future Finance A.I. Challenge  |  팀명: (참가신청서 기재)",
+    _para(frame, "제8회 KB Future Finance A.I. Challenge  |  팀명: 주식손절못함",
           size=13, color=MUTED)
 
     # ── 2. 문제 정의 ────────────────────────────────────────
