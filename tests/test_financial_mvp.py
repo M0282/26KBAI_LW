@@ -330,3 +330,47 @@ def test_every_declared_basis_article_exists_and_is_highlightable():
             assert focused_law_paragraphs(result.text, hint.focus), (
                 f"{rule}: {result.citation} 에 강조할 문구가 없다"
             )
+
+
+def test_basis_survives_live_api_failure():
+    """법령 API가 죽어도 근거는 유지돼야 한다 — 로컬 코퍼스로 폴백한다."""
+    from unittest.mock import patch
+
+    from src.ingest import law_search
+    from src.ingest.law_search import LawApiError, fetch_declared_basis, load_article_chunks
+    from src.verify.financial_rules import LAW_HINTS
+
+    if not load_article_chunks():
+        return
+
+    basis = LAW_HINTS["ACK-001"].basis
+    offline = fetch_declared_basis(basis, allow_live=False)
+    with patch.object(law_search, "_fetch_live_source", side_effect=LawApiError("망 장애")):
+        degraded = fetch_declared_basis(basis, allow_live=True)
+    assert [r.citation for r in degraded] == [r.citation for r in offline]
+    assert degraded
+
+
+def test_missing_declared_article_leaves_the_basis_empty():
+    """선언한 조문이 코퍼스에 없으면 다른 조문으로 대체하지 않는다.
+
+    비슷한 조문을 끼워 넣으면 틀린 근거를 조용히 내놓는 셈이 된다.
+    근거가 비어 화면에서 드러나는 편이 안전하다.
+    """
+    from unittest.mock import patch
+
+    from src.ingest import law_search
+    from src.ingest.law_search import fetch_declared_basis, load_article_chunks
+    from src.verify.financial_rules import LAW_HINTS
+
+    chunks = load_article_chunks()
+    if not chunks:
+        return
+
+    without = [
+        c for c in chunks
+        if not (c.get("source") == "금융소비자 보호에 관한 법률"
+                and str(c.get("article_no")) == "19")
+    ]
+    with patch.object(law_search, "load_article_chunks", return_value=without):
+        assert fetch_declared_basis(LAW_HINTS["ACK-001"].basis, allow_live=False) == []

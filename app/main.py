@@ -526,6 +526,9 @@ for col, status in zip(metric_cols, [CheckStatus.PASS, CheckStatus.WARNING, Chec
     label, _ = STATUS_LABEL[status]
     col.metric(label, summary_counts[status])
 
+# 규칙별 근거 조문을 모아 둔다. 화면과 내보내기가 같은 근거를 담아야 한다.
+legal_basis_by_rule: dict[str, list[dict]] = {}
+
 for check in checks:
     label, color = STATUS_LABEL[check.status]
     issue = issues[check.rule_id]
@@ -557,6 +560,18 @@ for check in checks:
                 "\n".join(focused_basis) if focused_basis
                 else legal_results[0].text[:700]
             )
+            # 근거가 여러 조문이면 전부 기록한다. 화면에는 법률 조문과 그 위임을
+            # 받은 감독규정이 함께 뜨는데(EXP-001은 3건), 기록에 첫 건만 남으면
+            # 그 기록으로는 판정을 설명할 수 없다.
+            legal_basis_by_rule[check.rule_id] = [
+                {
+                    "citation": r.citation,
+                    "title": r.title,
+                    "origin": r.origin,
+                    "applied_text": "\n".join(focused_law_paragraphs(r.text, hint.focus)),
+                }
+                for r in legal_results
+            ]
         if legal_results:
             hint = LAW_HINTS.get(check.rule_id)
             focus = hint.focus if hint else ()
@@ -696,6 +711,8 @@ report = {
             "status": check.status.value,
             "document_excerpt": check.document_excerpt,
             "evidence_clause": check.evidence_clause,
+            "evidence_text": check.evidence_text,
+            "legal_basis": legal_basis_by_rule.get(check.rule_id, []),
             "suggestion": check.suggestion,
         }
         for check in checks
