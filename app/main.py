@@ -30,7 +30,10 @@ from src.verify.ai_reasoner import build_legal_issues
 from src.verify.financial_rules import (
     DEFAULT_PROFILE_MIN_ALLOWED_GRADE,
     LAW_HINTS,
+    focus_pattern,
+    focused_law_paragraphs,
     run_package_checks,
+    split_law_paragraphs,
 )
 from src.verify.metrics import compute_metrics
 
@@ -43,6 +46,20 @@ STATUS_LABEL = {
     CheckStatus.MISSING: ("누락", "#C62828"),
     CheckStatus.RISK: ("위험", "#C62828"),
 }
+
+def _highlight_law(paragraph: str, focus) -> str:
+    """조문 문장에서 규칙이 걸리는 문구를 형광 표시한다.
+
+    법령 원문은 그대로 보여야 하므로 먼저 이스케이프하고, 그 다음 강조 표시만
+    입힌다(원문에 <, & 가 드물지만 넣지 않을 이유가 없다).
+    """
+    escaped = html.escape(paragraph)
+    pattern = focus_pattern(focus)
+    if not pattern:
+        return escaped
+    # 이스케이프 후 위치가 달라질 수 있는 문자는 강조 문구에 쓰지 않는다(한글·기호뿐).
+    return pattern.sub(lambda m: f"<mark>{m.group(0)}</mark>", escaped)
+
 
 st.set_page_config(page_title="KB 금융상품 판매서류 검증 AI Copilot", page_icon="🛡️", layout="wide")
 st.markdown(
@@ -62,6 +79,12 @@ padding:7px 12px; border-radius:999px; margin-top:13px; font-weight:700; }}
 box-shadow:0 8px 24px rgba(100,91,76,.07); min-height:145px; }}
 .kb-step {{ border-left:5px solid {KB_YELLOW}; }}
 .kb-evidence {{ background:#fff8df; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
+.kb-law {{ background:#fcfbf8; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
+padding:10px 14px; border-radius:8px; margin:6px 0 10px; }}
+.kb-law p {{ margin:0 0 8px; font-size:0.9rem; line-height:1.62; color:#3a3630; }}
+.kb-law p:last-child {{ margin-bottom:0; }}
+.kb-law mark {{ background:{KB_YELLOW}; color:#241f18; padding:1px 2px; border-radius:3px; font-weight:700; }}
+.kb-law-full p {{ font-size:0.83rem; color:#5a544b; }}
 div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radius:16px; border:1px dashed {KB_YELLOW}; }}
 .stButton button {{ background:{KB_YELLOW}; color:#332c22; border:none; font-weight:800; border-radius:10px; }}
 </style>
@@ -499,13 +522,40 @@ for check in checks:
             check.evidence_text = legal_results[0].text[:700]
         if legal_results:
             st.markdown("**관련 법령 원문 후보** (검색 상위 3건, 첫 번째가 최우선 근거)")
+            hint = LAW_HINTS.get(check.rule_id)
+            focus = hint.focus if hint else ()
             for rank, result in enumerate(legal_results, start=1):
                 tag = "최우선 근거" if rank == 1 else f"참고 {rank}"
                 st.markdown(f"- `{tag}` **{result.citation}** · {result.title} · 출처 `{result.origin}`")
-                # 조문 원문은 길어서 펼침으로 둔다(판정 화면이 법령 본문에 묻히지 않도록).
-                if result.text:
-                    with st.expander(f"{result.citation} 원문 보기"):
-                        st.caption(result.text[:700])
+                if not result.text:
+                    continue
+                # 조문 전체를 던지면 '그래서 어디가 문제냐'에 답하지 못한다.
+                # 이 규칙이 걸리는 항만 뽑아 문구를 강조해 먼저 보여준다.
+                # (예전에는 앞 700자만 잘라 보여줬는데, 금소법 19조의 설명 확인
+                #  의무는 ②항이라 그 문장이 화면에 아예 나오지 않았다.)
+                focused = focused_law_paragraphs(result.text, focus)
+                if focused:
+                    st.markdown(
+                        '<div class="kb-law">'
+                        + "".join(f"<p>{_highlight_law(p, focus)}</p>" for p in focused)
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.caption(
+                        "이 규칙과 직접 연결되는 문구를 이 조문에서 찾지 못했습니다 — "
+                        "참고 조문으로만 보세요."
+                    )
+                with st.expander(f"{result.citation} 조문 전체 보기"):
+                    st.markdown(
+                        '<div class="kb-law kb-law-full">'
+                        + "".join(
+                            f"<p>{_highlight_law(p, focus)}</p>"
+                            for p in split_law_paragraphs(result.text)
+                        )
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
         else:
             st.warning("법령 청크가 없습니다. `python -m src.ingest.fetch_regulations` 실행 또는 LAW_API_OC 설정이 필요합니다.")
 

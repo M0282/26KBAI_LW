@@ -295,3 +295,44 @@ def test_yeobu_survives_margin_label_inserted_between_syllables():
     assert find_guarantee_claims(text) == []
     # 그렇다고 '하여'까지 삼키면 안 된다.
     assert find_guarantee_claims("수익을 보장하여 드립니다.")
+
+
+# --- 근거 조문에서 걸리는 부분만 강조 ---
+
+def test_focused_paragraph_picks_the_clause_that_actually_applies():
+    """금소법 19조는 1,685자다. 설명 확인 의무는 ②항 한 문장이므로 그것만 보여야 한다.
+
+    예전에는 화면이 조문 앞 700자만 잘라 보여줘서, 정작 ACK-001의 근거인
+    ②항이 화면에 나오지 않았다.
+    """
+    from src.verify.financial_rules import LAW_HINTS, focused_law_paragraphs
+
+    article = (
+        "① 금융상품판매업자등은 일반금융소비자에게 계약 체결을 권유하는 경우에는 "
+        "중요한 사항을 일반금융소비자가 이해할 수 있도록 설명하여야 한다.\n"
+        "② 금융상품판매업자등은 제1항에 따른 설명에 필요한 설명서를 일반금융소비자에게 "
+        "제공하여야 하며, 설명한 내용을 일반금융소비자가 이해하였음을 서명, 기명날인, "
+        "녹취 또는 그 밖에 대통령령으로 정하는 방법으로 확인을 받아야 한다.\n"
+        "④ 제2항에 따른 설명서의 내용은 대통령령으로 정한다."
+    )
+    focused = focused_law_paragraphs(article, LAW_HINTS["ACK-001"].focus)
+    assert len(focused) == 1
+    assert focused[0].startswith("②")
+    assert "확인을 받아야 한다" in focused[0]
+
+
+def test_focus_pattern_tolerates_line_breaks_inside_a_phrase():
+    """조문 원문은 줄바꿈이 낱말 한가운데를 자른다 — 그래도 찾아야 한다."""
+    from src.verify.financial_rules import focus_pattern
+
+    pattern = focus_pattern(("기명날인",))
+    assert pattern.search("서명, 기명\n날인, 녹취")
+
+
+def test_paragraph_split_keeps_every_clause():
+    from src.verify.financial_rules import split_law_paragraphs
+
+    parts = split_law_paragraphs("① 첫째.\n② 둘째.\n③ 셋째.")
+    assert [p[0] for p in parts] == ["①", "②", "③"]
+    # 항 기호가 없는 조문은 통째로 한 덩이다(21조는 호로만 나뉜다).
+    assert split_law_paragraphs("1. 불확실한 사항에 대하여") == ["1. 불확실한 사항에 대하여"]
