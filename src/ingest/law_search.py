@@ -84,7 +84,10 @@ def search_chunks(
     corpus = [chunk for chunk in chunks if not is_repealed(chunk)]
     scores = _score_chunks(query, corpus)
     article_set = {str(value) for value in preferred_articles}
-    source_set = {str(value) for value in preferred_sources}
+    source_list = [str(value) for value in preferred_sources]
+    source_set = set(source_list)
+    # 지정 조문 번호는 주 출처에만 적용한다(아래 참고).
+    primary_source = source_list[0] if source_list else ""
     results: list[LawSearchResult] = []
 
     preferred: list[LawSearchResult] = []
@@ -107,8 +110,13 @@ def search_chunks(
         # 규칙마다 근거 조문을 손으로 매핑해 두었다. 그 조문은 점수와 무관하게 먼저 보여준다.
         # 가산점 방식으로는 BM25 점수가 높은 다른 조문에 밀린다 — 실측: 녹취 의무(REC-001)의
         # 최우선 근거로 28조(자료의 기록) 대신 18조(적정성원칙)가 표시됐다.
-        # 출처까지 지정됐다면 그 출처의 조문만 우선한다(같은 조 번호가 여러 법령에 있다).
-        if article_no in article_set and (not source_set or source in source_set):
+        #
+        # 다만 조문 번호는 **주 출처(첫 번째로 지정한 법령)에만** 적용한다. 법률과
+        # 감독규정은 번호 체계가 달라 같은 번호가 전혀 다른 내용이다. 두 출처에
+        # 모두 적용하면 번호만 같은 감독규정 조문이 인위적으로 상위에 올라온다
+        # (실측: 참고 조문 자리를 감독규정 제21조 '계약서류의 제공의무'가 8회 차지 —
+        #  ADV-001의 지정 조문이 21조라는 이유만으로).
+        if article_no in article_set and (not primary_source or source == primary_source):
             preferred.append(result)
         elif score > 0:
             results.append(result)
