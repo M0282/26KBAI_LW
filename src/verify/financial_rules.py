@@ -18,6 +18,11 @@ class RuleLawHint:
     query: str
     preferred_articles: tuple[str, ...] = ()
     preferred_sources: tuple[str, ...] = ()
+    # 조문 안에서 이 규칙이 실제로 걸리는 문구. 조문 전체를 보여주면
+    # "그래서 어디가 문제냐"에 답하지 못한다 — 금소법 19조는 1,685자이고
+    # 설명 확인 의무(②항)는 그중 한 문장이다.
+    # 값은 조문 원문에 실제로 있는 표현이어야 한다(대조해 넣었다).
+    focus: tuple[str, ...] = ()
 
 
 LAW_HINTS: dict[str, RuleLawHint] = {
@@ -26,36 +31,44 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         # 조문 힌트가 없으면 BM25가 정의·유형 조문(제2·3·4조)을 상위로 올려 근거가 겉돈다.
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률",),
+        focus=("중요한 사항", "이해할 수 있도록 설명"),
     ),
     "FIT-001": RuleLawHint(
         "일반금융소비자 투자성향 고위험 금융상품 적합성 원칙",
         preferred_articles=("17",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("적합하지 아니하다고 인정되는", "권유해서는 아니 된다", "면담ㆍ질문"),
     ),
     "EXP-001": RuleLawHint(
         "금융상품 중요사항 설명의무 원금손실 수수료 위험",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("이해할 수 있도록 설명", "중요한 사항", "위험등급", "수수료"),
     ),
     "DATE-001": RuleLawHint(
         "금융상품 계약 체결 전 설명의무 설명 시점",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률",),
+        focus=("계약 체결을 권유", "설명을 요청하는 경우", "설명하여야 한다"),
     ),
     "ACK-001": RuleLawHint(
         "금융상품 설명 확인 증빙 서명 교부",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("이해하였음을", "서명", "기명날인", "녹취", "확인을 받아",
+            "설명서를 일반금융소비자에게 제공"),
     ),
     "ADV-001": RuleLawHint(
         "투자성 상품 부당권유 금지 단정적 판단 원금보장 표현",
         preferred_articles=("21",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("불확실한 사항", "단정적 판단", "확실하다고 오인"),
     ),
     "DOC-001": RuleLawHint(
         "금융상품 판매 계약서류 제공의무 기록 유지 관리",
         preferred_articles=("23",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("계약서류를 금융소비자에게 지체 없이 제공", "증명하여야 한다"),
     ),
     "REC-001": RuleLawHint(
         # 녹취 의무의 직접 근거는 자본시장법 시행령·금융투자업규정이라 현재 코퍼스에 없다.
@@ -63,8 +76,59 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         "금융상품 판매 과정 자료의 기록 유지 관리 고령투자자 보호",
         preferred_articles=("28",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        # '유지ㆍ관리'는 28조 8개 항 중 4개에 나와서 강조의 초점이 흐려진다(실측).
+        # 기록 의무(①)와 훼손 방지(②)만 남긴다.
+        focus=("자료를 기록", "멸실 또는 위조"),
     ),
 }
+
+# 조문은 항(①②③…) 단위로 나뉜다. 규칙이 걸리는 항만 골라 보여주기 위해 쓴다.
+_LAW_PARAGRAPH = re.compile(r"([①-⑮])")
+
+
+def split_law_paragraphs(text: str) -> list[str]:
+    """조문을 항 단위로 나눈다. 항 기호가 없으면 전체를 한 덩이로 본다."""
+    parts = _LAW_PARAGRAPH.split(text or "")
+    if len(parts) <= 1:
+        stripped = (text or "").strip()
+        return [stripped] if stripped else []
+    paragraphs = []
+    head = parts[0].strip()
+    if head:
+        paragraphs.append(head)
+    for marker, body in zip(parts[1::2], parts[2::2]):
+        joined = (marker + body).strip()
+        if joined:
+            paragraphs.append(joined)
+    return paragraphs
+
+
+def focus_pattern(focus: Iterable[str]) -> re.Pattern[str] | None:
+    """강조할 문구를 찾는 정규식. 글자 사이 공백·줄바꿈을 허용한다.
+
+    조문 원문은 줄바꿈이 낱말 한가운데를 자르는 경우가 있어(PDF·API 모두)
+    문구를 그대로 찾으면 놓친다.
+    """
+    alternatives = [
+        r"\s*".join(re.escape(ch) for ch in phrase if not ch.isspace())
+        for phrase in focus
+        if phrase and phrase.strip()
+    ]
+    return re.compile("|".join(alternatives)) if alternatives else None
+
+
+def focused_law_paragraphs(text: str, focus: Iterable[str]) -> list[str]:
+    """조문에서 이 규칙이 걸리는 항만 돌려준다.
+
+    금소법 19조는 1,685자인데 설명 확인 의무는 ②항 한 문장이다. 전체를 던지면
+    담당자가 어디를 봐야 하는지 알 수 없고, 앞부분만 잘라 보여주면 정작 그
+    문장이 화면에 나오지 않는다(실측: 화면이 700자에서 잘려 ②항이 안 보였다).
+    """
+    pattern = focus_pattern(focus)
+    if not pattern:
+        return []
+    return [p for p in split_law_paragraphs(text) if pattern.search(p)]
+
 
 # 금소법 21조: 투자성 상품에 '손실이 없다'는 단정적 판단을 제공하는 것은 금지된다.
 # 다만 실물 서류에는 같은 낱말이 정반대 맥락으로 흔하게 등장한다(실측):
