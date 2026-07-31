@@ -98,6 +98,48 @@ def main() -> int:
         # Streamlit은 body가 아니라 내부 컨테이너가 스크롤된다. full_page=True 로는
         # 페이지 높이가 늘지 않아 마지막 뷰포트와 같은 그림이 나온다(실측: 해시 동일).
         # 콘텐츠 블록 자체를 찍어야 전체 높이가 담긴다.
+        # ── 판매 채널·고객 조건 증거 컷 ──────────────────────
+        # 대면·비대면과 고령투자자, 설명 담당자는 판매 건 요약 표에 함께 나온다.
+        # 그 표는 판매 건이 둘 이상일 때만 뜨므로 같은 서류로 칸을 하나 더 만든다.
+        try:
+            page.get_by_role("button", name="판매 건 추가").click()
+            page.wait_for_timeout(3000)
+            uploaders = page.locator("input[type=file]")
+            uploaders.nth(1).set_input_files([str(f.resolve()) for f in files])
+            page.wait_for_timeout(2500)
+            # 두 번째 칸만 비대면으로 표시해 채널 차이가 표에 드러나게 한다.
+            nonface = page.get_by_text("비대면(모바일·인터넷) 가입입니다", exact=False)
+            if nonface.count() >= 2:
+                nonface.nth(1).click()
+            _wait_for(page, "판매 건 요약", timeout=300_000)
+            page.wait_for_timeout(6000)
+
+            checks = page.get_by_text("고령투자자(만 65세 이상)", exact=False).first
+            checks.evaluate("el => el.scrollIntoView({block: 'center'})")
+            page.wait_for_timeout(1200)
+            page.screenshot(path=str(OUT / "05_채널체크.png"))
+            print(f"  저장: {OUT / '05_채널체크.png'}")
+
+            table = page.locator('[data-testid="stDataFrame"]').first
+            table.scroll_into_view_if_needed()
+            page.wait_for_timeout(1200)
+            table.screenshot(path=str(OUT / "06_판매건요약.png"))
+            print(f"  저장: {OUT / '06_판매건요약.png'} (채널·고령·담당자)")
+        except Exception as exc:
+            print(f"  · 채널 증거 컷을 찍지 못했습니다: {type(exc).__name__}")
+
+        # 정량 지표는 숫자만 크게 보이면 되므로 위쪽 지표 줄만 잘라 따로 둔다.
+        # 같은 실행에서 나온 그림이라 덱에 적은 수치와 화면 값이 어긋나지 않는다.
+        try:
+            from PIL import Image as _Image
+
+            _Image.open(OUT / "03_정량지표.png").crop((700, 90, 3190, 500)).save(
+                OUT / "07_정량지표스트립.png"
+            )
+            print(f"  저장: {OUT / '07_정량지표스트립.png'} (지표 줄만)")
+        except Exception as exc:
+            print(f"  · 지표 스트립을 만들지 못했습니다: {type(exc).__name__}")
+
         whole = OUT / "00_전체.png"
         block = page.locator('[data-testid="stMainBlockContainer"]').first
         try:

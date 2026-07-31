@@ -355,7 +355,7 @@ def build() -> Path:
 
     frame = _textbox(s, Inches(0.62), Inches(3.7), Inches(12.1), Inches(0.4))
     _para(frame, "TO-BE   제안 시스템 적용", size=15, bold=True, color=KB_GRAY, first=True, space_after=0)
-    tobe = ["상담·권유", "서류 4종 작성", "자동 검증 (약 50초)", "이상 시 즉시 보완", "전건 기록 자동 축적"]
+    tobe = ["상담·권유", "서류 4종 작성", "자동 검증 (약 30~50초)", "이상 시 즉시 보완", "전건 기록 자동 축적"]
     for i, step in enumerate(tobe):
         emphasis = i in (2, 3, 4)
         box = s.shapes.add_shape(5, Inches(0.62 + i * 2.46), Inches(4.15), Inches(2.24), Inches(0.62))
@@ -577,19 +577,19 @@ def build() -> Path:
         ["같은 근거 조문", "금소법 23조 계약서류 제공 의무", "금소법 23조 계약서류 제공 의무"],
     ], col_widths=[2.3, 4.6, 5.2], body_size=11)
 
-    _card(s, Inches(0.62), Inches(3.55), Inches(3.85), Inches(2.5),
+    _card(s, Inches(0.62), Inches(3.4), Inches(3.85), Inches(2.4),
           "채널은 서류에 없다",
           ["'비대면'이라 적힌 서류는 없습니다.",
            "없는 것을 추측하면 곧 환각입니다.",
            "담당자가 건마다 체크로 표시하고,",
            "규칙은 그 조건으로 판정합니다."], accent=KB_YELLOW)
-    _card(s, Inches(4.72), Inches(3.55), Inches(3.85), Inches(2.5),
+    _card(s, Inches(4.72), Inches(3.4), Inches(3.85), Inches(2.4),
           "체크만으로 통과시키지 않는다",
           ["표시해도 그냥 넘어가지 않습니다.",
            "다른 서류에 확인 문구와 고객",
            "확인값이 있을 때만 완화합니다.",
            "실측 — 데모 3종은 표시해도 '누락'"], accent=OK)
-    _card(s, Inches(8.82), Inches(3.55), Inches(3.9), Inches(2.5),
+    _card(s, Inches(8.82), Inches(3.4), Inches(3.9), Inches(2.4),
           "고령투자자·담당자도 같은 구조",
           ["생년월일은 추출하지 않습니다.",
            "만 65세 이상은 담당자가 표시하고,",
@@ -597,10 +597,14 @@ def build() -> Path:
            "설명 담당자는 서류에서 뽑아 판매",
            "건마다 표시 — 책임 소재의 근거입니다."], accent=KB_YELLOW)
 
-    frame = _textbox(s, Inches(0.62), Inches(6.2), Inches(12.1), Inches(0.7))
+    frame = _textbox(s, Inches(0.62), Inches(5.85), Inches(12.1), Inches(0.4))
     _para(frame, "이 구분이 없으면 정상적인 비대면 판매가 전부 '서류 누락'으로 뜹니다. "
                  "컴플라이언스 도구에서 오탐은 곧 도입 실패입니다.",
           size=13, bold=True, color=KB_GRAY, first=True)
+    # 세 카드가 말하는 것이 화면에 실제로 있다는 증거. 판매 건 요약 표 한 줄에
+    # 판매채널·고령투자자·설명 담당자가 함께 나온다.
+    _shot(s, Inches(0.62), Inches(6.3), Inches(12.1), Inches(1.15),
+          "06_판매건요약.png", "[스크린샷] 판매 건 요약 — 채널·고령·담당자", keep_sidebar=True)
 
     # ── 9. 검증 결과 ────────────────────────────────────────
     s = _slide(prs, "검증 결과", "실제 금융사 서류로 검증했고, 회귀 테스트로 고정했다", tag="기술 실현 가능성")
@@ -640,25 +644,29 @@ def build() -> Path:
     s = _slide(prs, "정량 효과와 운영 비용", "검증 시간과 API 비용을 실측 기준으로 제시", tag="활용 가능성")
     _table(s, Inches(0.62), Inches(1.6), Inches(12.1), [
         ["구분", "수작업 기준", "제안 시스템", "비고"],
-        ["판매 건 1건(서류 4종) 검증", "약 60분 (문서당 15분 가정)", "약 50초",
+        ["판매 건 1건(서류 4종) 검증", "약 60분 (문서당 15분 가정)", "약 30~50초",
          "첫 처리 실측 (LLM 판독 + 법령 API 포함)"],
         ["재검증(같은 서류)", "동일 시간 재소요", "즉시 · API 비용 0원", "결과 캐시"],
         ["API 비용", "—", "약 76원 / 건", "Claude Haiku 실측"],
         ["일 3,000건 환산(가정)", "약 3,000시간", "약 23만원 / 일", "규모 추정치"],
     ], col_widths=[3.2, 3.2, 3.0, 2.7])
 
-    _card(s, Inches(0.62), Inches(4.1), Inches(5.9), Inches(2.55),
+    _card(s, Inches(0.62), Inches(3.5), Inches(5.9), Inches(1.92),
           "비용이 낮은 이유",
           ["판정은 코드가 하므로 LLM 호출이 적다",
            "비전은 앞 단계가 실패했을 때만 호출",
-           "모델 승격(고가 모델) 발동 0회 — 저가 모델로 충분함을 교차 검증",
+           "모델 승격 발동 0회 — 저가 모델로 충분(교차 검증)",
            "동일 서류 재검증은 캐시로 0원"], accent=OK)
-    _card(s, Inches(6.75), Inches(4.1), Inches(5.97), Inches(2.55),
+    _card(s, Inches(6.75), Inches(3.5), Inches(5.97), Inches(1.92),
           "효과는 시간 단축만이 아니다",
           ["사람이 놓치기 쉬운 '서류 간 불일치'를 기계가 일관되게 확인",
            "판정 근거(조문·원문 위치)가 함께 남아 사후 입증에 사용",
            "검증 시각·모델·적용 정책을 기록으로 보관",
            "검사 범위를 명시해 과신을 방지"], accent=KB_YELLOW)
+
+    # 화면에 그대로 뜨는 지표. 위 표의 수치가 어디서 나온 값인지 보여 준다.
+    _shot(s, Inches(0.62), Inches(5.5), Inches(12.1), Inches(1.99),
+          "07_정량지표스트립.png", "[스크린샷] 정량 지표 화면", keep_sidebar=True)
 
     # ── 11. 시연 시나리오 ───────────────────────────────────
     s = _slide(prs, "시연 시나리오", "위반을 심어둔 패키지는 전부 적발하고, 정상 건은 통과시킨다",
