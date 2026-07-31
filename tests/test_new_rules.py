@@ -380,3 +380,46 @@ def test_short_paragraph_is_left_alone():
 
     paragraph = "② 판매업자는 1. 자료를 기록하고 2. 유지하여야 한다."
     assert narrow_to_items(paragraph, focus_pattern(("자료를 기록",))) == paragraph
+
+
+# --- 설명 담당자 기재는 판매 채널에 따라 달리 본다 ---
+# 판매 후 책임 소재를 따지거나 서류를 고칠 때 '누가 설명했는가'가 근거가 된다.
+# 대면은 담당자가 서류에 남아야 하고, 비대면은 사람 담당자 없이 전자적으로
+# 처리되는 것이 정상이라 담당자 부재를 문제로 삼으면 정상 판매를 오탐한다.
+def _ack_only(**extra):
+    from src.common.schemas import ParsedDocument, ParsedField
+
+    fields = {"customer_acknowledgement": "확인(서명)", **extra}
+    return [
+        ParsedDocument(
+            document_id="04_설명확인서.pdf",
+            doc_type="acknowledgement",
+            fields=[ParsedField(name=k, value=v, confidence=0.9) for k, v in fields.items()],
+            raw_text="상품설명 확인서 고객 확인 서명",
+        )
+    ]
+
+
+def test_face_to_face_without_staff_is_flagged():
+    from src.verify.financial_rules import check_acknowledgement
+
+    check = check_acknowledgement(_ack_only(), non_face_to_face=False)
+    assert check.status is CheckStatus.WARNING
+    assert "담당자" in (check.suggestion or "")
+
+
+def test_non_face_to_face_without_staff_is_not_flagged():
+    """비대면은 담당자가 없는 것이 정상 — 이것만으로 주의를 매기지 않는다."""
+    from src.verify.financial_rules import check_acknowledgement
+
+    check = check_acknowledgement(_ack_only(), non_face_to_face=True)
+    assert check.status is CheckStatus.PASS
+
+
+def test_staff_recorded_passes_on_both_channels():
+    from src.verify.financial_rules import check_acknowledgement
+
+    for nonface in (False, True):
+        check = check_acknowledgement(_ack_only(staff_name="최민수"), non_face_to_face=nonface)
+        assert check.status is CheckStatus.PASS
+        assert "최민수" in (check.document_excerpt or "")

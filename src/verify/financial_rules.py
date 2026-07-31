@@ -779,7 +779,18 @@ def check_dates(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
-def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
+def check_acknowledgement(
+    documents: list[ParsedDocument], non_face_to_face: bool = False
+) -> RuleCheck:
+    """고객 설명 확인 증빙 — 담당자 기재 여부는 판매 채널에 따라 다르게 본다.
+
+    non_face_to_face: 비대면(모바일·인터넷) 가입 여부.
+        대면 판매에서 설명 담당자가 서류에 없으면 사후에 '누가 설명했는지'를
+        입증할 수 없다. 책임 소재가 비는 것이므로 주의로 남긴다.
+        비대면은 사람 담당자 없이 전자적으로 진행되는 것이 정상이라,
+        담당자가 없다는 이유만으로 주의를 매기면 정상 판매를 오탐한다
+        (실측: 비대면으로 표시해도 담당자 부재만으로 주의가 떴다).
+    """
     acknowledgements = _documents_with(documents, "customer_acknowledgement")
     staff = _documents_with(documents, "staff_name")
     if not acknowledgements:
@@ -803,13 +814,28 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
             document_excerpt=f"고객 확인: {value}",
             suggestion="고객 확인 또는 서명 증빙을 보완하세요.",
         )
-    status = CheckStatus.PASS if staff else CheckStatus.WARNING
+    if staff:
+        return RuleCheck(
+            rule_id="ACK-001",
+            description="고객 설명 확인 증빙",
+            status=CheckStatus.PASS,
+            document_excerpt=f"고객 확인: {value} / 설명 담당자: {staff[0][1]}",
+        )
+    if non_face_to_face:
+        # 비대면은 사람 담당자 없이 전자적으로 처리되는 것이 정상이다.
+        return RuleCheck(
+            rule_id="ACK-001",
+            description="고객 설명 확인 증빙",
+            status=CheckStatus.PASS,
+            document_excerpt=f"고객 확인: {value} / 비대면 — 설명 담당자 기재 없음(정상)",
+        )
     return RuleCheck(
         rule_id="ACK-001",
         description="고객 설명 확인 증빙",
-        status=status,
-        document_excerpt=f"고객 확인: {value}" + (f" / 담당자: {staff[0][1]}" if staff else ""),
-        suggestion=None if staff else "설명 담당자 정보도 함께 확인하세요.",
+        status=CheckStatus.WARNING,
+        document_excerpt=f"고객 확인: {value} / 설명 담당자 미확인",
+        suggestion="대면 판매는 설명 담당자가 서류에 남아야 사후에 누가 설명했는지 "
+        "입증할 수 있습니다. 설명 담당자 성명을 확인하세요.",
     )
 
 
@@ -1117,7 +1143,7 @@ def run_package_checks(
         check_product_identity(documents),
         check_suitability(documents, profile_min_grade=profile_min_grade),
         check_dates(documents),
-        check_acknowledgement(documents),
+        check_acknowledgement(documents, non_face_to_face=non_face_to_face),
     ]
     checks.append(check_explanations(documents))
     checks.append(check_unfair_solicitation(documents))
