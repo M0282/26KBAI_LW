@@ -1,6 +1,7 @@
 """KB 금융상품 판매서류 검증 AI Copilot MVP."""
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -66,12 +67,50 @@ from src.verify.metrics import compute_metrics
 KB_YELLOW = "#FCAF17"
 KB_YELLOW_ALT = "#FDB913"
 KB_GRAY = "#645B4C"
+REPORT_SCHEMA_VERSION = "1.1.0"
+RULE_SET_VERSION = "2026-07-31"
 STATUS_LABEL = {
     CheckStatus.PASS: ("통과", "#2E7D32"),
     CheckStatus.WARNING: ("주의", "#B26A00"),
     CheckStatus.MISSING: ("누락", "#C62828"),
     CheckStatus.RISK: ("위험", "#C62828"),
 }
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _package_fingerprint(
+    raw_map: dict[str, bytes], *, elderly: bool, nonface: bool,
+    with_llm: bool, live_law: bool,
+) -> str:
+    """파일명 대신 실제 파일 내용과 판정 설정으로 판매 건을 식별한다."""
+    digest = hashlib.sha256()
+    for name in sorted(raw_map):
+        digest.update(name.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        digest.update(raw_map[name])
+        digest.update(b"\0")
+    digest.update(
+        f"elderly={int(elderly)}|nonface={int(nonface)}|"
+        f"llm={int(with_llm)}|live_law={int(live_law)}".encode("ascii")
+    )
+    return digest.hexdigest()
+
+
+def _regulation_corpus_hash() -> str | None:
+    """현재 로컬 법령 조문 묶음의 내용 해시. 재현성 확인용이다."""
+    paths = sorted((ROOT / "data" / "regulations").glob("*.articles.json"))
+    if not paths:
+        return None
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
 
 def _highlight_law(paragraph: str, focus) -> str:
     """조문 문장에서 규칙이 걸리는 문구를 형광 표시한다.
@@ -92,10 +131,11 @@ st.markdown(
     f"""
 <style>
 :root {{ --kb-yellow:{KB_YELLOW}; --kb-yellow2:{KB_YELLOW_ALT}; --kb-gray:{KB_GRAY}; }}
-/* 앱 배경을 밝게 강제하지 않는다 — 현재 테마의 배경·글자색을 그대로 따른다.
-   강제하면 다크모드에서 Streamlit이 칠하는 밝은 글자가 밝은 배경 위에 얹혀 사라진다
-   (실측: 다크모드 판정 화면에서 업로더 라벨·안내 카드 글자가 전부 보이지 않았다).
-   반대로 우리가 배경을 직접 칠하는 상자에는 글자색을 반드시 함께 지정한다. */
+/* 기존 System / Light / Dark 테마 전환을 유지한다.
+   앱 배경을 밝게 강제하지 않아 현재 테마의 배경과 기본 글자색을 그대로 따른다. */
+html, body, .stApp, button, input, textarea, select {{
+  font-family:"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;
+}}
 .block-container {{ padding-top:1.25rem; max-width:1500px; }}
 .kb-hero {{ background:white; color:#3a3630; border:1px solid #eee8da; border-radius:22px; padding:24px 28px;
 box-shadow:0 10px 30px rgba(100,91,76,.08); margin-bottom:18px; }}
@@ -108,7 +148,7 @@ padding:7px 12px; border-radius:999px; margin-top:13px; font-weight:700; }}
 box-shadow:0 8px 24px rgba(100,91,76,.07); min-height:145px; }}
 .kb-step {{ border-left:5px solid {KB_YELLOW}; }}
 .kb-evidence {{ background:#fff8df; color:#3a3630; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
-.kb-law {{ background:#fcfbf8; color:#3a3630; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
+.kb-law {{ background:#fcfbf8; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
 padding:10px 14px; border-radius:8px; margin:6px 0 10px; }}
 .kb-law p {{ margin:0 0 8px; font-size:0.9rem; line-height:1.62; color:#3a3630; }}
 .kb-law p:last-child {{ margin-bottom:0; }}
@@ -286,6 +326,20 @@ def legal_basis(query: str, articles: tuple[str, ...], sources: tuple[str, ...],
     )
 
 
+def FIELD_SOURCE_TYPE(field) -> str:
+    """JSON 재사용을 위한 고정 코드. 화면용 한글 라벨과 분리한다."""
+    if not field.value:
+        return "unavailable"
+    confidence = field.confidence or 0.0
+    if confidence >= 0.9:
+        return "deterministic_scan"
+    if confidence >= 0.8:
+        return "ai_vision"
+    if confidence >= 0.5:
+        return "grounded_match"
+    return "ai_extraction"
+
+
 def FIELD_SOURCE_LABEL(field) -> str:
     """추출값의 근거를 사람이 읽을 수 있게. 신뢰도는 추출 단계가 매긴 값이다.
 
@@ -379,6 +433,7 @@ for order, slot in enumerate(active_slots, start=1):
         "errors": failures,
         "checks": slot_checks,
         "issues": slot_issues,
+        "uploaded_count": len(uploaded_packages[slot]),
     })
 progress.empty()
 
@@ -622,7 +677,13 @@ for check in checks:
 st.subheader("3. 정량 지표")
 # 캐시 도입 후 재실행 시간은 0에 가깝다. 지표에는 '첫 처리 시간'을 유지해야
 # 수작업 대비 절감이 정직한 숫자가 된다(위젯을 누를 때마다 0.1초로 바뀌면 안 된다).
-package_key = "|".join(sorted(document.document_id for document in parsed_documents))
+package_key = _package_fingerprint(
+    pdf_bytes_map,
+    elderly=package["elderly"],
+    nonface=package["nonface"],
+    with_llm=use_llm,
+    live_law=live_law,
+)
 first_elapsed = st.session_state.setdefault(
     f"elapsed::{package_key}", time.perf_counter() - started_at
 )
@@ -680,36 +741,184 @@ st.caption(
     "컴플라이언스 기록물은 '언제·어떤 기준으로 판정했는가'가 핵심입니다. "
     "판정·근거 조문과 함께 검증 시각·사용 모델·적용 정책을 담아 내려받습니다."
 )
+all_legal_basis = [
+    item
+    for items in legal_basis_by_rule.values()
+    for item in items
+]
+
+# 실제 이번 검증에서 조회·판정 근거로 연결된 조문을 실행 결과에서 동적으로 만든다.
+# dict.fromkeys를 쓰면 규칙 실행 순서는 유지하면서 중복 조문만 제거할 수 있다.
+applied_legal_articles = list(dict.fromkeys(
+    item.get("citation")
+    for item in all_legal_basis
+    if item.get("citation")
+))
+
+# 통과가 아닌 항목에 연결된 조문은 사람이 다시 확인해야 할 법적 근거로 별도 기록한다.
+review_legal_articles = list(dict.fromkeys(
+    item.get("citation")
+    for check in checks
+    if check.status != CheckStatus.PASS
+    for item in legal_basis_by_rule.get(check.rule_id, [])
+    if item.get("citation")
+))
+
+legal_origins = sorted({item.get("origin", "") for item in all_legal_basis if item.get("origin")})
+live_law_succeeded = "law.go.kr" in legal_origins
+
+# Streamlit 재실행 때마다 바뀌지 않도록, 같은 파일·설정 조합의 최초 검증 시각을 보존한다.
+verified_at = st.session_state.setdefault(
+    f"verified_at::{package_key}",
+    datetime.now().astimezone().isoformat(timespec="seconds"),
+)
+exported_at = datetime.now().astimezone().isoformat(timespec="seconds")
+reasoning_model = (
+    (os.environ.get("ANTHROPIC_MODEL") or "claude-haiku-4-5")
+    if any(issue.used_llm for issue in issues.values())
+    else None
+)
+vision_model = (
+    (os.environ.get("VISION_MODEL") or "claude-haiku-4-5")
+    if any(pdf.vision_applied for pdf in pdf_details.values())
+    else None
+)
+extraction_models = sorted({
+    meta.model_used
+    for meta in extraction_meta.values()
+    if getattr(meta, "model_used", None)
+})
+
 report = {
-    "verified_at": datetime.now().isoformat(timespec="seconds"),
+    "schema_version": REPORT_SCHEMA_VERSION,
+    "verified_at": verified_at,
+    "exported_at": exported_at,
     "tool": "KB 금융상품 판매서류 검증 AI Copilot (MVP)",
-    # 검사 범위는 규칙 목록에서 만든다 — 규칙을 늘렸는데 문구가 그대로면
-    # 기록이 사실과 어긋난다(실측: 규칙이 8종인데 '5개 항목'으로 남고 있었다).
+    "package": {
+        "package_id": package_key[:16],
+        "label": package["label"],
+        "slot": package["slot"] + 1,
+        "package_count_in_session": len(packages),
+        "export_scope": "selected_package_only",
+    },
     "scope": {
-        "description": "금융상품 판매서류 교차 검증 — 판매 시점 서류로 확인 가능한 항목",
-        "rule_count": len(checks),
-        "rules": [{"rule_id": c.rule_id, "checks": c.description} for c in checks],
-        "excluded": ["제18조 적정성원칙", "제20조 불공정영업행위", "제22조 광고 관련 의무"],
+        "description": "금융상품 판매서류 교차 검증 MVP",
+        "rule_count": 8,
+        "rule_ids": [
+            "PKG-001", "FIT-001", "EXP-001", "DATE-001",
+            "ACK-001", "ADV-001", "DOC-001", "REC-001",
+        ],
+        # 이 목록은 현재 규칙 엔진이 지원하는 전체 법률 범위다.
+        # 실제 이번 판매 건에서 연결된 조문은 아래 legal_articles 섹터에 따로 기록한다.
+        "legal_articles": [
+            "금융소비자 보호에 관한 법률 제17조",
+            "금융소비자 보호에 관한 법률 제19조",
+            "금융소비자 보호에 관한 법률 제21조",
+            "금융소비자 보호에 관한 법률 제23조",
+            "금융소비자 보호에 관한 법률 제28조",
+        ],
+        "legal_articles_meaning": "supported_scope",
+        "excluded_scope": [
+            "제18조 적정성원칙",
+            "제20조 불공정영업행위",
+            "제22조 광고 관련 의무",
+        ],
+    },
+    "legal_articles": {
+        # 실제 법령 검색 결과에 존재하는 조문만 들어가므로 하드코딩 목록이 아니다.
+        "applied": applied_legal_articles,
+        # 위험·누락·주의 판정에 연결되어 담당자 재검토가 필요한 조문만 별도 표시한다.
+        "requiring_review": review_legal_articles,
+        # 어떤 규칙이 어떤 조문을 사용했는지 추적할 수 있도록 규칙별 연결도 남긴다.
+        "by_rule": [
+            {
+                "rule_id": check.rule_id,
+                "status": check.status.value,
+                "citations": [
+                    item.get("citation")
+                    for item in legal_basis_by_rule.get(check.rule_id, [])
+                    if item.get("citation")
+                ],
+            }
+            for check in checks
+        ],
     },
     "settings": {
-        "llm_used": use_llm,
-        "extraction_model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
-        "vision_model": os.environ.get("VISION_MODEL", "claude-haiku-4-5"),
-        "live_law_lookup": live_law,
+        "llm_requested": use_llm,
+        "live_law_lookup_requested": live_law,
         "profile_min_grade": dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE),
         "elderly_investor": package["elderly"],
         "non_face_to_face": package["nonface"],
     },
+    "execution": {
+        "llm_actually_used": any(meta.used_llm for meta in extraction_meta.values())
+        or any(issue.used_llm for issue in issues.values()),
+        "fallback_occurred": any(
+            getattr(meta, "fallback_occurred", False) for meta in extraction_meta.values()
+        ),
+        "extraction_models_used": extraction_models,
+        "reasoning_model_used": reasoning_model,
+        "vision_model_used": vision_model,
+        "law_lookup": {
+            "live_lookup_requested": live_law,
+            "live_lookup_succeeded": live_law_succeeded,
+            "fallback_to_local": bool(live_law and "local" in legal_origins),
+            "sources_used": legal_origins,
+        },
+    },
+    "versions": {
+        "report_schema": REPORT_SCHEMA_VERSION,
+        "rule_set": RULE_SET_VERSION,
+        "git_commit": os.environ.get("GITHUB_SHA") or os.environ.get("GIT_COMMIT"),
+        "law_corpus_sha256": _regulation_corpus_hash(),
+    },
+    "processing": {
+        "status": "partial" if errors else "complete",
+        "uploaded_document_count": package.get(
+            "uploaded_count", len(parsed_documents) + len(errors)
+        ),
+        "processed_document_count": len(parsed_documents),
+        "failed_document_count": len(errors),
+        "failures": errors,
+    },
     "documents": [
         {
             "document_id": document.document_id,
+            "sha256": _sha256_bytes(pdf_bytes_map[document.document_id]),
+            "file_size_bytes": len(pdf_bytes_map[document.document_id]),
             "doc_type": document.doc_type,
+            "read_mode": (
+                "ai_vision" if pdf_details[document.document_id].vision_applied
+                else "ocr" if pdf_details[document.document_id].ocr_applied
+                else "text_layer"
+            ),
+            "extraction": {
+                "used_llm": extraction_meta[document.document_id].used_llm,
+                "model_used": getattr(
+                    extraction_meta[document.document_id], "model_used", None
+                ),
+                "models_attempted": list(
+                    getattr(
+                        extraction_meta[document.document_id],
+                        "models_attempted",
+                        (),
+                    )
+                ),
+                "fallback_occurred": getattr(
+                    extraction_meta[document.document_id],
+                    "fallback_occurred",
+                    False,
+                ),
+                "warning": extraction_meta[document.document_id].warning,
+            },
             "fields": [
                 {
                     "name": field.name,
                     "value": field.value,
                     "page": field.page,
-                    "source": FIELD_SOURCE_LABEL(field),
+                    "confidence": field.confidence,
+                    "source_type": FIELD_SOURCE_TYPE(field),
+                    "source_label": FIELD_SOURCE_LABEL(field),
                 }
                 for field in document.fields
             ],
@@ -721,26 +930,40 @@ report = {
             "rule_id": check.rule_id,
             "description": check.description,
             "status": check.status.value,
-            "document_excerpt": check.document_excerpt,
+            "document_evidence": {
+                "excerpt": check.document_excerpt,
+            },
+            "legal_basis": legal_basis_by_rule.get(check.rule_id, []),
+            "explanation": {
+                "rationale": issues[check.rule_id].rationale,
+                "recommended_action": issues[check.rule_id].recommended_action,
+                "generated_by_llm": issues[check.rule_id].used_llm,
+                "search_query": issues[check.rule_id].search_query,
+            },
+            "rule_suggestion": check.suggestion,
+            # 기존 소비자와의 호환을 위해 대표 근거 필드는 유지한다.
             "evidence_clause": check.evidence_clause,
             "evidence_text": check.evidence_text,
-            "legal_basis": legal_basis_by_rule.get(check.rule_id, []),
-            "suggestion": check.suggestion,
         }
         for check in checks
     ],
     "metrics": {
         "document_count": metrics.document_count,
+        "check_count": metrics.check_count,
         "blocker_count": metrics.blocker_count,
         "warning_count": metrics.warning_count,
         "elapsed_seconds": metrics.elapsed_seconds,
     },
+    # 기존 스키마 호환 필드. 새 소비자는 processing.failures를 사용한다.
     "unread_documents": errors,
 }
 st.download_button(
-    "검증 결과 JSON 내려받기",
+    f"{package['label']} 검증 결과 JSON 내려받기",
     data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
-    file_name=f"검증결과_{datetime.now():%Y%m%d_%H%M%S}.json",
+    file_name=(
+        f"검증결과_판매건{package['slot'] + 1}_"
+        f"{datetime.now():%Y%m%d_%H%M%S}.json"
+    ),
     mime="application/json",
 )
 

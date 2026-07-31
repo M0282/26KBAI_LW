@@ -127,6 +127,9 @@ class ExtractionResult:
     doc_type: str
     fields: list[ParsedField]
     used_llm: bool
+    model_used: str | None = None
+    models_attempted: tuple[str, ...] = ()
+    fallback_occurred: bool = False
     warning: str | None = None
 
 
@@ -467,9 +470,10 @@ def classify_document_rule_based(text: str) -> str:
 # 청약 절차를 길게 설명해서 '청약·신청금액·가입일'이 상품설명서 어휘보다
 # 많이 나온다(실측 — 대우 DLS611·미래에셋 ELS4716·신한 ELS핵심설명서 3건이
 # 모두 본문 최고점 application). 반면 제목은 <간이투자설명서>로 명확하다.
-# 낱말은 '제목에만 나오는 말'이어야 한다. 일반 문구와 겹치는 말은 넣지 않는다 —
-# 공백을 지우고 맞추기 때문에 '고객 확인 서명'이 '고객확인서'가 되어 설명확인서로
-# 둔갑한다(테스트가 잡아냈다). 같은 이유로 '확인서'·'신청서'·'설명서'는 제외한다.
+#
+# 낱말은 '제목에만 나오는 말'이어야 한다. 공백을 지우고 맞추기 때문에
+# '고객 확인 서명'이 '고객확인서'가 되어 설명확인서로 둔갑한다(테스트가 잡아냈다).
+# 같은 이유로 '확인서'·'신청서'·'설명서'는 제외한다.
 _TITLE_ZONE_CHARS = 300
 _TITLE_WORDS: dict[str, tuple[str, ...]] = {
     "acknowledgement": ("상품설명확인서", "설명의무이행확인", "설명확인서"),
@@ -715,7 +719,13 @@ def _attempt_llm(
     if confident and confident != doc_type:
         doc_type = confident
 
-    result = ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
+    result = ExtractionResult(
+        doc_type=doc_type,
+        fields=fields,
+        used_llm=True,
+        model_used=model,
+        models_attempted=(model,),
+    )
     _apply_doc_type_gating(result, parsed)
     return result
 
@@ -775,6 +785,7 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         result = extract_rule_based(parsed, locator=locator)
+        result.fallback_occurred = True
         result.warning = "ANTHROPIC_API_KEY가 없어 규칙 기반 추출을 사용했습니다."
         return result
 
@@ -788,6 +799,7 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
             last_error = exc
             continue
         best = result
+        result.models_attempted = tuple(ladder[: i + 1])
         # 마지막 티어이거나 결과가 충분하면 종료. 약하면 다음(상위) 모델로 승격.
         if i == len(ladder) - 1 or not _is_weak(result):
             if i > 0:
@@ -798,6 +810,8 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
         return best
     # 모든 티어 실패 → 규칙 기반 폴백
     result = extract_rule_based(parsed, locator=locator)
+    result.models_attempted = tuple(ladder)
+    result.fallback_occurred = True
     result.warning = (
         f"LLM 추출 실패로 규칙 기반 폴백 사용: {type(last_error).__name__}"
         if last_error
