@@ -651,6 +651,19 @@ if len(packages) > 1:
         product = next(
             (v for d in package["documents"] if (v := field_map(d).get("product_name"))), "상품 미상"
         )
+        # 판매 후 책임을 따지거나 서류를 고칠 때 '누가 설명했는가'가 근거가 된다.
+        # 판매 건이 여러 개면 상품별로 담당자를 바로 볼 수 있어야 한다.
+        # 서류마다 담당자가 다르게 적혀 있으면 그것 자체가 확인할 신호이므로
+        # 하나로 합치지 않고 그대로 나열한다.
+        staff = list(dict.fromkeys(
+            v for d in package["documents"] if (v := field_map(d).get("staff_name"))
+        ))
+        if staff:
+            staff_text = " / ".join(staff)
+        elif package["nonface"]:
+            staff_text = "— (비대면)"      # 사람 담당자가 없는 것이 정상
+        else:
+            staff_text = "미확인"           # 대면인데 서류에 없다 = 책임 소재가 빈다
         summary_rows.append({
             "판매 건": package["label"],
             "상품": product,
@@ -662,6 +675,7 @@ if len(packages) > 1:
             "주의": counts[CheckStatus.WARNING],
             "통과": counts[CheckStatus.PASS],
             "서류": len(package["documents"]),
+            "설명 담당자": staff_text,
         })
     st.dataframe(summary_rows, hide_index=True, use_container_width=True)
 
