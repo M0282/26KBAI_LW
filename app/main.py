@@ -170,14 +170,13 @@ def _render_rule_evidence(
     *,
     active_slot: int,
 ) -> None:
-    """규칙별 구조화 근거와 해당 PDF 위치를 같은 자리에서 보여준다."""
+    """규칙별 구조화 근거와 해당 PDF 위치를 같은 자리에서 보여준다.
+
+    요약(서류 근거)은 판정 바로 아래에 두고, 근거 항목과 원문 보기는 조치 안내
+    다음에 둔다. 담당자가 '무엇이 문제인가 → 무엇을 하면 되는가 → 원문 어디인가'
+    순서로 읽도록 화면 순서를 맞춘 것이다.
+    """
     if not check.evidence_items:
-        if check.document_excerpt:
-            st.markdown(
-                f'<div class="kb-evidence"><b>서류 근거 요약</b><br>'
-                f'{html.escape(check.document_excerpt)}</div>',
-                unsafe_allow_html=True,
-            )
         return
 
     st.markdown("**판정 근거**")
@@ -779,12 +778,19 @@ for check in checks:
     action = check.action_plan
     if not action:
         continue
+    # '필요한 조치'는 이 건에 맞춘 구체 문구를 먼저 쓴다. 규칙이 가진 공식 조치는
+    # 모든 건에 같은 문장이라 표에서는 무엇을 봐야 하는지가 드러나지 않는다
+    # (예: "고객의 서명·전자확인·녹취 등 설명 이해 확인 증빙과 설명 담당자 정보를 보완"
+    #  → "설명 담당자 성명·사원번호·서명 일자·고객 서명 일자 명시 확인").
+    # 담당자·차단 여부·완료 기준은 그대로 규칙 엔진 값을 쓴다.
+    issue = issues.get(check.rule_id)
+    specific = (issue.recommended_action or "").strip() if issue else ""
     action_rows.append({
         "우선순위": "즉시" if action.sale_blocking else "확인",
         "규칙": check.rule_id,
         "상태": STATUS_LABEL[check.status][0],
         "담당자": action.responsible_role,
-        "필요한 조치": action.required_action,
+        "필요한 조치": specific or action.required_action,
         "판매 차단": "예" if action.sale_blocking else "아니오",
     })
 if action_rows:
@@ -802,14 +808,23 @@ for check in checks:
     issue = issues[check.rule_id]
     with st.expander(f"[{label}] {check.rule_id} · {check.description}", expanded=check.status != CheckStatus.PASS):
         st.markdown(f"**판정:** <span style='color:{color};font-weight:800'>{label}</span>", unsafe_allow_html=True)
+        if check.document_excerpt:
+            st.markdown(
+                f'<div class="kb-evidence"><b>서류 근거</b><br>'
+                f'{html.escape(check.document_excerpt)}</div>',
+                unsafe_allow_html=True,
+            )
+        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다.
+        source_label = "AI 쟁점 설명" if issue.used_llm else "규칙 기반 설명(LLM 미사용)"
+        st.markdown(f"**{source_label}:** {html.escape(issue.rationale)}")
+        # 이 건에서 구체적으로 무엇을 확인할지(LLM이 서류 값에 맞춰 좁혀 준 안내).
+        st.info(issue.recommended_action)
+        # 담당자·판매 차단·완료 기준은 규칙 엔진이 정한 공식 조치다.
+        _render_action_plan(check)
+        # 원문 근거는 조치 안내 다음, 법령 근거 앞에 둔다.
         _render_rule_evidence(
             check, pdf_details, pdf_bytes_map, active_slot=active_slot
         )
-        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다.
-        # 공식 조치는 LLM이 아니라 결정론적 규칙이 별도로 제시한다.
-        source_label = "AI 쟁점 설명" if issue.used_llm else "규칙 기반 설명(LLM 미사용)"
-        st.markdown(f"**{source_label}:** {html.escape(issue.rationale)}")
-        _render_action_plan(check)
 
         hint = LAW_HINTS[check.rule_id]
         legal_results = legal_basis(
@@ -1156,12 +1171,17 @@ report = {
                 "rationale": issues[check.rule_id].rationale,
                 "generated_by_llm": issues[check.rule_id].used_llm,
                 "search_query": issues[check.rule_id].search_query,
-                # 하위 호환 필드지만 값은 규칙 엔진의 공식 조치로 고정한다.
+                # 하위 호환 필드는 규칙 엔진의 공식 조치로 고정한다 — 기록의 기준은
+                # 사람이 정한 규칙이어야 한다.
                 "recommended_action": (
                     check.action_plan.required_action
                     if check.action_plan else "추가 조치 없음"
                 ),
                 "recommended_action_generated_by_llm": False,
+                # 화면에 함께 뜨는 '이 건에서 확인할 것'(LLM이 서류 값에 맞춰 좁힌 문구).
+                # 공식 조치와 구분해 별도 키로 남긴다.
+                "case_specific_check": issues[check.rule_id].recommended_action,
+                "case_specific_check_generated_by_llm": issues[check.rule_id].used_llm,
             },
             "action_plan": (
                 check.action_plan.model_dump() if check.action_plan else None

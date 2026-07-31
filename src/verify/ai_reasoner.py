@@ -95,10 +95,15 @@ def build_legal_issues(
 각 rule_id마다 다음만 생성하세요.
 - search_query: 국가법령정보/RAG 검색에 사용할 구체적인 한국어 질의
 - rationale: 제공된 서류 사실만 이용한 짧은 설명
-공식 조치·담당자·판매 차단 여부는 규칙 엔진이 정하므로 생성하지 마세요.
+- recommended_action: 이 건에서 담당자가 구체적으로 무엇을 확인·보완해야 하는지 한 문장.
+  서류에 실제로 나온 값·항목 이름을 그대로 써서 좁게 적으세요.
+  예) "설명 담당자 성명·사원번호·서명 일자·고객 서명 일자 명시 확인"
+  판정을 바꾸거나 위반을 확정하는 표현은 쓰지 마세요.
+
+담당자·판매 차단 여부·완료 기준은 규칙 엔진이 정하므로 생성하지 마세요.
 
 JSON 객체만 출력하세요.
-{{"issues":[{{"rule_id":"FIT-001","search_query":"...","rationale":"..."}}]}}
+{{"issues":[{{"rule_id":"FIT-001","search_query":"...","rationale":"...","recommended_action":"..."}}]}}
 
 서류 구조화 사실:
 {json.dumps(facts, ensure_ascii=False)}
@@ -133,13 +138,17 @@ JSON 객체만 출력하세요.
                 continue
             query = str(item.get("search_query", "")).strip()
             rationale = str(item.get("rationale", "")).strip()
+            # 이 건에 맞춘 구체적 확인 문구. 담당자·차단 여부·완료 기준을 정하는
+            # 공식 조치(check.action_plan)는 여전히 규칙 엔진이 소유한다 — 여기서
+            # 만드는 것은 '무엇을 들여다봐야 하는가'를 좁혀 주는 안내다.
+            action = str(item.get("recommended_action", "")).strip()
             if not query:
                 continue
             fallback[rule_id] = LegalIssue(
                 rule_id=rule_id,
                 search_query=query[:300],
                 rationale=(rationale or fallback[rule_id].rationale)[:800],
-                recommended_action=fallback[rule_id].recommended_action[:800],
+                recommended_action=(action or fallback[rule_id].recommended_action)[:800],
                 used_llm=True,
             )
     except Exception:
