@@ -777,30 +777,57 @@ for col, status in zip(metric_cols, [CheckStatus.PASS, CheckStatus.WARNING, Chec
     label, _ = STATUS_LABEL[status]
     col.metric(label, summary_counts[status])
 
+# 표는 세 가지만 답한다 — 무엇이 걸렸나 / 지금 팔아도 되나 / 무엇을 하면 되나.
+#
+# 예전에는 우선순위·판매 차단·담당자 열이 더 있었는데 정보를 더하지 않았다(실측).
+#   우선순위(즉시/확인) = 판매 차단을 다른 말로 쓴 것 — 두 값이 어긋난 행 0건
+#   판매 차단(예/아니오) = 상태(누락·위험)에서 그대로 유도 — 설명되지 않는 행 0건
+# 같은 사실이 세 열에 반복되면서 정작 읽어야 할 '필요한 조치'가 좁아졌다.
+# 상태 한 열에 판매 가능 여부까지 담고, 남은 폭은 조치 문구에 준다.
 action_rows = []
 for check in checks:
     action = check.action_plan
     if not action:
         continue
-    # '필요한 조치'는 이 건에 맞춘 구체 문구를 먼저 쓴다. 규칙이 가진 공식 조치는
-    # 모든 건에 같은 문장이라 표에서는 무엇을 봐야 하는지가 드러나지 않는다
-    # (예: "고객의 서명·전자확인·녹취 등 설명 이해 확인 증빙과 설명 담당자 정보를 보완"
-    #  → "설명 담당자 성명·사원번호·서명 일자·고객 서명 일자 명시 확인").
-    # 담당자·차단 여부·완료 기준은 그대로 규칙 엔진 값을 쓴다.
+    # 이 건에 맞춘 구체 문구를 먼저 쓴다. 규칙의 공식 조치는 모든 건에 같은 문장이라
+    # 표에서는 무엇을 봐야 하는지가 드러나지 않는다.
     issue = issues.get(check.rule_id)
     specific = (issue.recommended_action or "").strip() if issue else ""
+    status_text = STATUS_LABEL[check.status][0]
     action_rows.append({
-        "우선순위": "즉시" if action.sale_blocking else "확인",
         "규칙": check.rule_id,
-        "상태": STATUS_LABEL[check.status][0],
-        "담당자": action.responsible_role,
+        "상태": f"{status_text} · 판매 중단" if action.sale_blocking else f"{status_text} · 확인 후 진행",
         "필요한 조치": specific or action.required_action,
-        "판매 차단": "예" if action.sale_blocking else "아니오",
+        "_blocking": action.sale_blocking,
     })
 if action_rows:
     st.markdown("#### 조치 필요 항목 요약")
-    action_rows.sort(key=lambda row: (row["판매 차단"] != "예", row["규칙"]))
-    st.dataframe(action_rows, hide_index=True, use_container_width=True)
+    action_rows.sort(key=lambda row: (not row["_blocking"], row["규칙"]))
+    st.dataframe(
+        [{k: v for k, v in row.items() if not k.startswith("_")} for row in action_rows],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "규칙": st.column_config.TextColumn(width="small"),
+            "상태": st.column_config.TextColumn(width="small"),
+            "필요한 조치": st.column_config.TextColumn(width="large"),
+        },
+    )
+    # 담당 배정은 규칙마다 고정이라 행마다 반복할 이유가 없다. 이 판매 건에 실제로
+    # 걸린 규칙의 배정만 한 줄로 적는다.
+    routing: dict[str, list[str]] = {}
+    for check in checks:
+        if check.action_plan:
+            routing.setdefault(check.action_plan.responsible_role, []).append(check.rule_id)
+    if routing:
+        st.caption(
+            "담당 배정 — "
+            + " / ".join(
+                f"{role}: {', '.join(sorted(rules))}" for role, rules in sorted(routing.items())
+            )
+            + ".  서류에 기재된 설명 담당자 이름은 위 '1. AI 문서 분류·핵심 필드 추출'의"
+            " staff_name 에서 서류별로 확인하세요."
+        )
 else:
     st.success("현재 검사 범위에서 추가 조치가 필요한 항목이 없습니다.")
 
