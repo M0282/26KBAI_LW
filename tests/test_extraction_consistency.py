@@ -189,11 +189,50 @@ def test_confident_rule_classification_detects_acknowledgement():
 
 
 def test_confident_classification_abstains_when_ambiguous():
-    """여러 유형 키워드가 섞이면 확신하지 않는다(LLM 판단을 뒤집지 않는다)."""
+    """제목이 없고 여러 유형 어휘만 섞이면 확신하지 않는다(LLM 판단을 뒤집지 않는다)."""
     from src.parser.financial_extractor import confident_rule_doc_type
 
-    mixed = "상품설명서 위험등급 원금손실 수수료 · 투자성향 적합성 진단 · 고객 확인 서명"
+    mixed = "위험등급 원금손실 수수료 · 투자성향 적합성 진단 · 고객 확인 서명"
     assert confident_rule_doc_type(mixed) is None
+
+
+# --- 제목이 본문 빈도를 이긴다 ---
+# 실측: ELS·DLS 상품설명서는 청약 절차를 길게 설명해 '청약·신청금액·가입일'이
+# 상품설명서 어휘보다 많이 나온다. 본문 빈도로 가르면 3건(대우 DLS611·
+# 미래에셋 ELS4716·신한 ELS핵심설명서)이 전부 가입신청서로 뒤집혔다.
+def test_title_beats_body_keyword_counts():
+    from src.parser.financial_extractor import classify_document_rule_based, confident_rule_doc_type
+
+    els = (
+        "간이투자설명서\n제611회 파생결합증권(DLS)\n"
+        + "청약 청약 청약 가입일 신청금액 계약일 가입신청 " * 6
+    )
+    assert classify_document_rule_based(els) == "application"   # 본문 빈도는 뒤집힌다
+    assert confident_rule_doc_type(els) == "product_description"
+
+
+def test_customer_signature_phrase_is_not_a_title():
+    """'고객 확인 서명'은 공백을 지우면 '고객확인서'가 된다 — 제목으로 오인하면 안 된다."""
+    from src.parser.financial_extractor import title_doc_type
+
+    assert title_doc_type("가입신청서\n고객 확인 서명 란") == "application"
+
+
+def test_acknowledgement_title_wins_when_other_types_also_score():
+    """다른 유형 점수가 0이 아니어도 제목이 분명하면 확신한다.
+
+    실측: 설명확인서에서 acknowledgement 9점인데 product_description 4점이 있어
+    예전 조건(나머지 전부 0)이 침묵했고, LLM의 오답이 그대로 최종 유형이 됐다.
+    """
+    from src.parser.financial_extractor import classify_scores, confident_rule_doc_type
+
+    text = (
+        "상품설명 확인서\n설명일: 2026-07-15\n설명 담당자: 이판매\n"
+        "상품설명서 교부 여부 확인 · 위험등급 안내 · 수수료 안내\n가입신청 내용 확인\n"
+    )
+    scores = classify_scores(text)
+    assert scores["product_description"] > 0 and scores["application"] > 0
+    assert confident_rule_doc_type(text) == "acknowledgement"
 
 
 # --- 고객확인 값 표준화 ---

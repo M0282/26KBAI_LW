@@ -461,15 +461,62 @@ def classify_document_rule_based(text: str) -> str:
     return best_type if scores.get(best_type, 0) > 0 else "unknown"
 
 
+# 서류의 정체는 본문 어휘 빈도가 아니라 '제목'에 있다.
+#
+# 왜: 본문 키워드 수로 가르면 ELS·DLS 상품설명서가 뒤집힌다. 그 서류들은
+# 청약 절차를 길게 설명해서 '청약·신청금액·가입일'이 상품설명서 어휘보다
+# 많이 나온다(실측 — 대우 DLS611·미래에셋 ELS4716·신한 ELS핵심설명서 3건이
+# 모두 본문 최고점 application). 반면 제목은 <간이투자설명서>로 명확하다.
+# 낱말은 '제목에만 나오는 말'이어야 한다. 일반 문구와 겹치는 말은 넣지 않는다 —
+# 공백을 지우고 맞추기 때문에 '고객 확인 서명'이 '고객확인서'가 되어 설명확인서로
+# 둔갑한다(테스트가 잡아냈다). 같은 이유로 '확인서'·'신청서'·'설명서'는 제외한다.
+_TITLE_ZONE_CHARS = 300
+_TITLE_WORDS: dict[str, tuple[str, ...]] = {
+    "acknowledgement": ("상품설명확인서", "설명의무이행확인", "설명확인서"),
+    "suitability_form": ("투자자정보확인서", "투자자정보분석", "적합성진단표", "적합성확인서",
+                         "투자성향진단", "투자성향분석"),
+    "application": ("가입청약서", "가입신청서", "청약서"),
+    "product_description": ("핵심상품설명서", "간이투자설명서", "핵심설명서", "투자설명서",
+                            "상품설명서"),
+}
+# 같은 자리에서 여러 낱말이 걸리면 '더 긴 낱말'이 이긴다.
+# '적합성확인서'는 '확인서'를 품고 있어서, 유형 순서로 가르면 설명확인서로 뒤집힌다.
+_TITLE_ORDER = ("acknowledgement", "suitability_form", "application", "product_description")
+
+
+def title_doc_type(text: str, zone_chars: int = _TITLE_ZONE_CHARS) -> str | None:
+    """서류 앞머리(제목 영역)에서 문서유형을 읽는다. 못 읽으면 None."""
+    zone = _compact_for_match(text[:zone_chars])
+    if not zone:
+        return None
+    best: tuple[int, int, str] | None = None   # (낱말 길이, 유형 우선순위 역순, 유형)
+    for rank, doc_type in enumerate(_TITLE_ORDER):
+        for word in _TITLE_WORDS[doc_type]:
+            needle = _compact_for_match(word)
+            if needle and needle in zone:
+                candidate = (len(needle), -rank, doc_type)
+                if best is None or candidate > best:
+                    best = candidate
+    return best[2] if best else None
+
+
 def confident_rule_doc_type(text: str) -> str | None:
     """규칙 분류가 '이견 없이' 하나를 가리킬 때만 그 유형을 반환한다.
 
     doc_type은 모든 필드 게이팅의 기준이라 판정 임계값이다. 실측 — 제목이
     '상품설명 확인서'인 설명확인서를 LLM이 상품설명서로 오분류했고, 그 결과
     고객확인·담당자 필드가 스키마에서 통째로 버려져 ACK-001이 위험에서
-    누락으로 약해졌다. 반면 규칙 분류는 키워드 4개로 정확히 맞혔다.
-    다른 유형 점수가 0이고 자기 점수가 2 이상일 때만 '확신'으로 본다.
+    누락으로 약해졌다.
+
+    1순위는 제목이다. 예전에는 '다른 유형 점수가 전부 0'일 때만 확신으로 봤는데,
+    그 조건이 너무 빡빡해 정작 이 함수를 만든 계기였던 설명확인서에서도 발동하지
+    않았다(실측 — acknowledgement 9점인데 product_description 4점이 있어 침묵했고,
+    LLM의 오답 product_description이 그대로 남았다).
     """
+    by_title = title_doc_type(text)
+    if by_title:
+        return by_title
+    # 제목을 못 읽은 서류는 예전 기준을 그대로 쓴다 — 애매하면 침묵하고 LLM에 맡긴다.
     scores = classify_scores(text)
     best_type = max(scores, key=lambda k: scores[k], default="unknown")
     best_score = scores.get(best_type, 0)

@@ -92,26 +92,31 @@ st.markdown(
     f"""
 <style>
 :root {{ --kb-yellow:{KB_YELLOW}; --kb-yellow2:{KB_YELLOW_ALT}; --kb-gray:{KB_GRAY}; }}
-.stApp {{ background:linear-gradient(180deg,#fffdf7 0%,#f7f6f2 100%); }}
+/* 앱 배경을 밝게 강제하지 않는다 — 현재 테마의 배경·글자색을 그대로 따른다.
+   강제하면 다크모드에서 Streamlit이 칠하는 밝은 글자가 밝은 배경 위에 얹혀 사라진다
+   (실측: 다크모드 판정 화면에서 업로더 라벨·안내 카드 글자가 전부 보이지 않았다).
+   반대로 우리가 배경을 직접 칠하는 상자에는 글자색을 반드시 함께 지정한다. */
 .block-container {{ padding-top:1.25rem; max-width:1500px; }}
-.kb-hero {{ background:white; border:1px solid #eee8da; border-radius:22px; padding:24px 28px;
+.kb-hero {{ background:white; color:#3a3630; border:1px solid #eee8da; border-radius:22px; padding:24px 28px;
 box-shadow:0 10px 30px rgba(100,91,76,.08); margin-bottom:18px; }}
 .kb-title {{ color:{KB_GRAY}; font-size:2.1rem; font-weight:800; margin:0; }}
 .kb-title b {{ color:{KB_YELLOW}; }}
 .kb-sub {{ color:#655f55; margin-top:8px; font-size:1.02rem; }}
 .kb-badge {{ display:inline-block; border:1px solid {KB_YELLOW}; background:#fff8df; color:{KB_GRAY};
 padding:7px 12px; border-radius:999px; margin-top:13px; font-weight:700; }}
-.kb-card {{ background:white; border:1px solid #eee8da; border-radius:18px; padding:18px;
+.kb-card {{ background:white; color:#3a3630; border:1px solid #eee8da; border-radius:18px; padding:18px;
 box-shadow:0 8px 24px rgba(100,91,76,.07); min-height:145px; }}
 .kb-step {{ border-left:5px solid {KB_YELLOW}; }}
-.kb-evidence {{ background:#fff8df; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
-.kb-law {{ background:#fcfbf8; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
+.kb-evidence {{ background:#fff8df; color:#3a3630; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
+.kb-law {{ background:#fcfbf8; color:#3a3630; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
 padding:10px 14px; border-radius:8px; margin:6px 0 10px; }}
 .kb-law p {{ margin:0 0 8px; font-size:0.9rem; line-height:1.62; color:#3a3630; }}
 .kb-law p:last-child {{ margin-bottom:0; }}
 .kb-law mark {{ background:{KB_YELLOW}; color:#241f18; padding:1px 2px; border-radius:3px; font-weight:700; }}
 .kb-law-full p {{ font-size:0.83rem; color:#5a544b; }}
-div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radius:16px; border:1px dashed {KB_YELLOW}; }}
+/* 업로더는 배경을 칠하지 않는다. 안쪽 글자는 Streamlit이 테마 색으로 그리므로
+   여기서 흰 배경을 깔면 다크모드에서 흰 글자가 흰 바탕에 얹혀 라벨이 사라진다. */
+div[data-testid="stFileUploader"] {{ padding:12px; border-radius:16px; border:1px dashed {KB_YELLOW}; }}
 .stButton button {{ background:{KB_YELLOW}; color:#332c22; border:none; font-weight:800; border-radius:10px; }}
 </style>
 <div class="kb-hero">
@@ -678,7 +683,14 @@ st.caption(
 report = {
     "verified_at": datetime.now().isoformat(timespec="seconds"),
     "tool": "KB 금융상품 판매서류 검증 AI Copilot (MVP)",
-    "scope": "금융소비자보호법 제17조(적합성원칙)·제19조(설명의무) 관련 5개 항목",
+    # 검사 범위는 규칙 목록에서 만든다 — 규칙을 늘렸는데 문구가 그대로면
+    # 기록이 사실과 어긋난다(실측: 규칙이 8종인데 '5개 항목'으로 남고 있었다).
+    "scope": {
+        "description": "금융상품 판매서류 교차 검증 — 판매 시점 서류로 확인 가능한 항목",
+        "rule_count": len(checks),
+        "rules": [{"rule_id": c.rule_id, "checks": c.description} for c in checks],
+        "excluded": ["제18조 적정성원칙", "제20조 불공정영업행위", "제22조 광고 관련 의무"],
+    },
     "settings": {
         "llm_used": use_llm,
         "extraction_model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
