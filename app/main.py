@@ -48,7 +48,7 @@ if str(ROOT) not in sys.path:
 load_dotenv(ROOT / ".env", override=False)
 
 from src.common.llm_cache import clear_llm_cache
-from src.common.schemas import CheckStatus, ParsedDocument
+from src.common.schemas import CheckStatus, EvidenceRef, ParsedDocument, RuleCheck
 from src.ingest.law_search import find_legal_basis
 from src.parser.financial_extractor import DOC_TYPES, extract_document, field_map
 from src.parser.pdf_loader import load_pdf, to_parsed_document
@@ -67,7 +67,7 @@ from src.verify.metrics import compute_metrics
 KB_YELLOW = "#FCAF17"
 KB_YELLOW_ALT = "#FDB913"
 KB_GRAY = "#645B4C"
-REPORT_SCHEMA_VERSION = "1.1.0"
+REPORT_SCHEMA_VERSION = "1.2.0"
 RULE_SET_VERSION = "2026-07-31"
 STATUS_LABEL = {
     CheckStatus.PASS: ("통과", "#2E7D32"),
@@ -124,6 +124,125 @@ def _highlight_law(paragraph: str, focus) -> str:
         return escaped
     # 이스케이프 후 위치가 달라질 수 있는 문자는 강조 문구에 쓰지 않는다(한글·기호뿐).
     return pattern.sub(lambda m: f"<mark>{m.group(0)}</mark>", escaped)
+
+
+_EVIDENCE_TYPE_LABEL = {
+    "field": "추출 필드",
+    "text": "원문 문구",
+    "missing_field": "필수 항목 미확인",
+    "missing_document": "필수 문서 누락",
+    "manual_review": "수동 확인 필요",
+}
+
+
+def _evidence_hits(evidence: EvidenceRef, pdf_details: dict) -> list[dict]:
+    """구조화 근거를 PDF 좌표와 연결한다.
+
+    원문 문장 → 정규화 값 → 짧은 발췌 순으로 시도한다. LLM 비전 판독값처럼
+    텍스트 레이어에 없는 근거는 빈 목록을 반환하고 화면에서 그 사실을 밝힌다.
+    """
+    if not evidence.document_id or evidence.document_id not in pdf_details:
+        return []
+    pdf = pdf_details[evidence.document_id]
+    candidates = [evidence.search_text, evidence.value, evidence.excerpt]
+    tried: set[str] = set()
+    for candidate in candidates:
+        query = (candidate or "").strip()
+        if not query or query in tried or query.startswith("AI 비전 판독:"):
+            continue
+        tried.add(query)
+        hits = pdf.locate(query)
+        if hits:
+            return hits
+    return []
+
+
+def _evidence_payload(evidence: EvidenceRef, pdf_details: dict) -> dict:
+    payload = evidence.model_dump()
+    payload["locations"] = _evidence_hits(evidence, pdf_details)
+    return payload
+
+
+def _render_rule_evidence(
+    check: RuleCheck,
+    pdf_details: dict,
+    pdf_bytes_map: dict[str, bytes],
+    *,
+    active_slot: int,
+) -> None:
+    """규칙별 구조화 근거와 해당 PDF 위치를 같은 자리에서 보여준다."""
+    if not check.evidence_items:
+        if check.document_excerpt:
+            st.markdown(
+                f'<div class="kb-evidence"><b>서류 근거 요약</b><br>'
+                f'{html.escape(check.document_excerpt)}</div>',
+                unsafe_allow_html=True,
+            )
+        return
+
+    st.markdown("**판정 근거**")
+    for index, evidence in enumerate(check.evidence_items, start=1):
+        kind = _EVIDENCE_TYPE_LABEL.get(evidence.evidence_type, evidence.evidence_type)
+        document = evidence.document_id or "판매건 전체"
+        page = f" · {evidence.page}쪽" if evidence.page else ""
+        field = f" · `{evidence.field_name}`" if evidence.field_name else ""
+        value = evidence.value or evidence.excerpt or "미확인"
+        st.markdown(
+            f'<div class="kb-evidence"><b>{index}. {html.escape(kind)}</b> · '
+            f'{html.escape(document)}{html.escape(page)}{field}<br>'
+            f'{html.escape(value)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if evidence.evidence_type not in {"field", "text"} or not evidence.document_id:
+            continue
+        hits = _evidence_hits(evidence, pdf_details)
+        if not hits:
+            st.caption(
+                "이 근거는 추출값으로 기록됐지만 PDF 텍스트 좌표는 찾지 못했습니다. "
+                "스캔·비전 판독값이거나 OCR 공백 차이일 수 있으니 원문을 확인하세요."
+            )
+            continue
+
+        toggle_key = f"evidence::{active_slot}::{check.rule_id}::{index}"
+        if st.toggle("원문 근거 보기", key=toggle_key):
+            preferred = next(
+                (hit for hit in hits if evidence.page and hit["page"] == evidence.page),
+                hits[0],
+            )
+            image = render_highlighted_page(
+                pdf_bytes_map[evidence.document_id],
+                page_number=preferred["page"],
+                rects=preferred["rects"],
+            )
+            st.image(
+                image,
+                caption=(
+                    f"{evidence.document_id} · {preferred['page']}페이지 · "
+                    f"{evidence.field_name or '원문 문구'} 근거 위치"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "동일 문구가 여러 페이지에 있으면 JSON의 document_evidence.items.locations에 "
+                "모든 좌표가 함께 기록됩니다."
+            )
+
+
+def _render_action_plan(check: RuleCheck) -> None:
+    action = check.action_plan
+    if not action:
+        st.success("추가 조치 없음")
+        return
+    blocking = "예 — 조치 완료 전 판매 중단" if action.sale_blocking else "아니오 — 확인 후 진행 가능"
+    st.markdown("**필요한 조치**")
+    st.markdown(
+        f'<div class="kb-evidence"><b>담당:</b> {html.escape(action.responsible_role)}<br>'
+        f'<b>조치:</b> {html.escape(action.required_action)}<br>'
+        f'<b>판매 차단:</b> {html.escape(blocking)}<br>'
+        f'<b>완료 기준:</b> {html.escape(action.completion_criteria)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 st.set_page_config(page_title="KB 금융상품 판매서류 검증 AI Copilot", page_icon="🛡️", layout="wide")
@@ -655,6 +774,26 @@ for col, status in zip(metric_cols, [CheckStatus.PASS, CheckStatus.WARNING, Chec
     label, _ = STATUS_LABEL[status]
     col.metric(label, summary_counts[status])
 
+action_rows = []
+for check in checks:
+    action = check.action_plan
+    if not action:
+        continue
+    action_rows.append({
+        "우선순위": "즉시" if action.sale_blocking else "확인",
+        "규칙": check.rule_id,
+        "상태": STATUS_LABEL[check.status][0],
+        "담당자": action.responsible_role,
+        "필요한 조치": action.required_action,
+        "판매 차단": "예" if action.sale_blocking else "아니오",
+    })
+if action_rows:
+    st.markdown("#### 조치 필요 항목 요약")
+    action_rows.sort(key=lambda row: (row["판매 차단"] != "예", row["규칙"]))
+    st.dataframe(action_rows, hide_index=True, use_container_width=True)
+else:
+    st.success("현재 검사 범위에서 추가 조치가 필요한 항목이 없습니다.")
+
 # 규칙별 근거 조문을 모아 둔다. 화면과 내보내기가 같은 근거를 담아야 한다.
 legal_basis_by_rule: dict[str, list[dict]] = {}
 
@@ -663,12 +802,14 @@ for check in checks:
     issue = issues[check.rule_id]
     with st.expander(f"[{label}] {check.rule_id} · {check.description}", expanded=check.status != CheckStatus.PASS):
         st.markdown(f"**판정:** <span style='color:{color};font-weight:800'>{label}</span>", unsafe_allow_html=True)
-        if check.document_excerpt:
-            st.markdown(f'<div class="kb-evidence"><b>서류 근거</b><br>{html.escape(check.document_excerpt)}</div>', unsafe_allow_html=True)
-        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다(같은 자리에 성격이 다른 두 가지가 온다).
+        _render_rule_evidence(
+            check, pdf_details, pdf_bytes_map, active_slot=active_slot
+        )
+        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다.
+        # 공식 조치는 LLM이 아니라 결정론적 규칙이 별도로 제시한다.
         source_label = "AI 쟁점 설명" if issue.used_llm else "규칙 기반 설명(LLM 미사용)"
         st.markdown(f"**{source_label}:** {html.escape(issue.rationale)}")
-        st.info(issue.recommended_action)
+        _render_action_plan(check)
 
         hint = LAW_HINTS[check.rule_id]
         legal_results = legal_basis(
@@ -986,6 +1127,7 @@ report = {
                     "value": field.value,
                     "page": field.page,
                     "confidence": field.confidence,
+                    "evidence_text": field.evidence_text,
                     "source_type": FIELD_SOURCE_TYPE(field),
                     "source_label": FIELD_SOURCE_LABEL(field),
                 }
@@ -1000,15 +1142,30 @@ report = {
             "description": check.description,
             "status": check.status.value,
             "document_evidence": {
+                "summary": check.document_excerpt,
+                # 각 근거는 문서·필드·페이지·원문과 PDF 좌표까지 함께 기록한다.
+                "items": [
+                    _evidence_payload(item, pdf_details)
+                    for item in check.evidence_items
+                ],
+                # 1.1 소비자와의 호환을 위해 기존 키도 유지한다.
                 "excerpt": check.document_excerpt,
             },
             "legal_basis": legal_basis_by_rule.get(check.rule_id, []),
             "explanation": {
                 "rationale": issues[check.rule_id].rationale,
-                "recommended_action": issues[check.rule_id].recommended_action,
                 "generated_by_llm": issues[check.rule_id].used_llm,
                 "search_query": issues[check.rule_id].search_query,
+                # 하위 호환 필드지만 값은 규칙 엔진의 공식 조치로 고정한다.
+                "recommended_action": (
+                    check.action_plan.required_action
+                    if check.action_plan else "추가 조치 없음"
+                ),
+                "recommended_action_generated_by_llm": False,
             },
+            "action_plan": (
+                check.action_plan.model_dump() if check.action_plan else None
+            ),
             "rule_suggestion": check.suggestion,
             # 기존 소비자와의 호환을 위해 대표 근거 필드는 유지한다.
             "evidence_clause": check.evidence_clause,

@@ -544,6 +544,9 @@ def _field(name: str, value: str | None, evidence: str | None, confidence: float
         value=normalize_field(name, value),
         page=_page_from_locator(locator, evidence),
         confidence=confidence if value is not None else 0.0,
+        # LLM/규칙이 사용한 실제 원문을 보존한다. 값만 남기면 같은 단어가 여러 번
+        # 등장할 때 어느 위치가 판정 근거인지 구분할 수 없다.
+        evidence_text=evidence,
     )
 
 
@@ -831,7 +834,9 @@ def apply_doc_type_schema(result: ExtractionResult) -> None:
         return
     by_name = {field.name: field for field in result.fields}
     result.fields = [
-        by_name.get(name) or ParsedField(name=name, value=None, page=None, confidence=0.0)
+        by_name.get(name) or ParsedField(
+            name=name, value=None, page=None, confidence=0.0, evidence_text=None
+        )
         for name in expected
     ]
 
@@ -982,6 +987,7 @@ def _fill_from_vision(
             if grade:
                 field = by_name["product_risk_level"]
                 field.value, field.confidence, field.page = grade, 0.85, page_number
+                field.evidence_text = f"AI 비전 판독: {grade}"
                 wanted.remove("risk_grade")
 
         if "contract_date" in wanted:
@@ -989,6 +995,7 @@ def _fill_from_vision(
             if value:
                 field = by_name["contract_date"]
                 field.value, field.confidence, field.page = value, 0.85, page_number
+                field.evidence_text = f"AI 비전 판독: {value}"
                 wanted.remove("contract_date")
 
         if "signature" in wanted:
@@ -1005,6 +1012,7 @@ def _fill_from_vision(
         field = by_name["customer_acknowledgement"]
         if signature_verdict is not None:
             field.value, field.confidence = signature_verdict, 0.85
+            field.evidence_text = f"AI 비전 판독: {signature_verdict}"
         elif field.value and not states_unsigned(field.value):
             # 서명란을 찾지 못했는데 텍스트만 보고 '확인'을 낸 값은 근거가 없다.
             # 다만 '미서명'처럼 서류가 명시적으로 부정을 적어둔 경우는 그 자체가

@@ -16,6 +16,10 @@ class ParsedField(BaseModel):
     value: Optional[str] = Field(default=None, description="추출값. 못 찾으면 None")
     page: Optional[int] = Field(default=None, description="원본 문서에서의 페이지")
     confidence: Optional[float] = Field(default=None, description="추출 신뢰도 0~1")
+    evidence_text: Optional[str] = Field(
+        default=None,
+        description="추출값을 뒷받침하는 원문 문구. PDF 좌표 탐색과 감사 근거에 사용",
+    )
 
 
 class ParsedDocument(BaseModel):
@@ -34,6 +38,37 @@ class CheckStatus(str, Enum):
     WARNING = "warning"  # 확인 권고
 
 
+class EvidenceRef(BaseModel):
+    """규칙 판정과 원문을 연결하는 구조화 근거 한 건.
+
+    evidence_type:
+      - field: 문서에서 추출된 필드 값
+      - text: 문제가 된 실제 원문 문구
+      - missing_field: 문서는 있으나 필수 필드를 찾지 못함
+      - missing_document: 필수 문서가 없음
+      - manual_review: 시스템이 자동 확인할 수 없어 사람이 확인해야 함
+    """
+
+    evidence_type: str
+    document_id: Optional[str] = None
+    field_name: Optional[str] = None
+    value: Optional[str] = None
+    excerpt: Optional[str] = None
+    search_text: Optional[str] = Field(
+        default=None, description="PDF 좌표 탐색에 사용할 원문 검색어"
+    )
+    page: Optional[int] = None
+
+
+class RemediationAction(BaseModel):
+    """판정 이후 담당자가 수행해야 할 공식 조치 계획."""
+
+    required_action: str
+    responsible_role: str
+    sale_blocking: bool = Field(description="조치 완료 전 판매 진행을 차단해야 하는지")
+    completion_criteria: str = Field(description="조치가 완료됐다고 판단할 수 있는 기준")
+
+
 class RuleCheck(BaseModel):
     """개별 규칙 검증 결과 한 건."""
 
@@ -44,10 +79,18 @@ class RuleCheck(BaseModel):
         default=None, description="근거 조문 (예: 은행업감독규정 제78조 제1항)"
     )
     evidence_text: Optional[str] = Field(default=None, description="근거 조문 원문 발췌")
-    document_excerpt: Optional[str] = Field(
-        default=None, description="문제가 된 서류 원문 발췌 (하이라이트용)"
+    evidence_items: list[EvidenceRef] = Field(
+        default_factory=list,
+        description="판정에 사용한 문서·필드·원문 또는 부재 근거 목록",
     )
-    suggestion: Optional[str] = Field(default=None, description="수정/보완 제안")
+    action_plan: Optional[RemediationAction] = Field(
+        default=None, description="담당자·차단 여부·완료 기준을 포함한 공식 조치"
+    )
+    # 아래 두 필드는 기존 화면·내보내기 소비자와의 호환을 위해 유지한다.
+    document_excerpt: Optional[str] = Field(
+        default=None, description="문제가 된 서류 원문 발췌 (요약/하위 호환용)"
+    )
+    suggestion: Optional[str] = Field(default=None, description="수정/보완 제안 (하위 호환용)")
 
 
 class VerificationReport(BaseModel):

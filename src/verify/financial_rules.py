@@ -9,7 +9,9 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from src.common.schemas import CheckStatus, ParsedDocument, RuleCheck
+from src.common.schemas import (
+    CheckStatus, EvidenceRef, ParsedDocument, ParsedField, RemediationAction, RuleCheck,
+)
 from src.parser.financial_extractor import field_map, parse_iso_date, states_unsigned
 
 
@@ -811,6 +813,298 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
+
+def _field_object(document: ParsedDocument, field_name: str) -> ParsedField | None:
+    return next((field for field in document.fields if field.name == field_name), None)
+
+
+def _field_evidence(document: ParsedDocument, field_name: str) -> EvidenceRef:
+    """추출 필드와 원문 근거를 하나의 감사 가능한 참조로 묶는다."""
+    field = _field_object(document, field_name)
+    value = field.value if field else None
+    source = field.evidence_text if field else None
+    # 비전 판독 메모는 PDF 텍스트 검색어로 쓸 수 없다. 값이 텍스트 레이어에 있으면
+    # 값으로 재검색하고, 없으면 UI가 '좌표 확인 불가'를 솔직하게 표시한다.
+    search_text = source
+    if source and source.startswith("AI 비전 판독:"):
+        search_text = value
+    return EvidenceRef(
+        evidence_type="field" if value else "missing_field",
+        document_id=document.document_id,
+        field_name=field_name,
+        value=value,
+        excerpt=source or value or f"{field_name} 미확인",
+        search_text=search_text or value,
+        page=field.page if field else None,
+    )
+
+
+def _missing_document_evidence(doc_type: str) -> EvidenceRef:
+    return EvidenceRef(
+        evidence_type="missing_document",
+        field_name=doc_type,
+        excerpt=f"필수 문서 미확인: {REQUIRED_DOC_LABELS.get(doc_type, doc_type)}",
+    )
+
+
+def _dedupe_evidence(items: list[EvidenceRef]) -> list[EvidenceRef]:
+    seen: set[tuple] = set()
+    result: list[EvidenceRef] = []
+    for item in items:
+        key = (
+            item.evidence_type, item.document_id, item.field_name,
+            item.value, item.excerpt, item.page,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _official_action(check: RuleCheck) -> RemediationAction | None:
+    """규칙 판정에 대응하는 공식 조치.
+
+    LLM이 표현을 바꾸더라도 담당자·차단 여부·완료 기준은 동일해야 하므로
+    결정론적 규칙이 소유한다. PASS에는 불필요한 조치를 만들지 않는다.
+    """
+    if check.status is CheckStatus.PASS:
+        return None
+
+    blocking = check.status in (CheckStatus.RISK, CheckStatus.MISSING)
+    actions: dict[str, tuple[str, str, str]] = {
+        "PKG-001": (
+            "판매 담당자",
+            "서류별 상품명·상품코드를 대조하고 혼입 문서를 제거하거나 판매 클래스를 확정하세요.",
+            "모든 판매서류가 동일한 상품·동일한 판매 클래스를 가리키는 상태로 재검증을 통과해야 합니다.",
+        ),
+        "FIT-001": (
+            "판매 담당자",
+            "고객 투자성향을 재진단하거나 해당 성향에서 가입 가능한 위험등급의 상품으로 변경하세요.",
+            "최종 투자성향과 상품 위험등급이 내부 적합성 매트릭스를 통과한 뒤 재검증해야 합니다.",
+        ),
+        "EXP-001": (
+            "판매 담당자",
+            "상품설명서에 원금손실 가능성·위험등급·수수료 및 비용 설명을 보완하세요.",
+            "세 중요사항이 문서 원문에서 확인되고 고객에게 제공된 설명서로 재검증돼야 합니다.",
+        ),
+        "DATE-001": (
+            "판매 담당자",
+            "실제 설명 시점과 계약 시점을 확인하고 잘못 기재된 날짜를 정정하거나 추가 증빙을 확보하세요.",
+            "설명일이 계약일보다 늦지 않으며 두 날짜의 형식과 출처가 확인돼야 합니다.",
+        ),
+        "ACK-001": (
+            "판매 담당자",
+            "고객의 서명·전자확인·녹취 등 설명 이해 확인 증빙과 설명 담당자 정보를 보완하세요.",
+            "유효한 고객 확인값과 필요한 담당자 정보가 문서 또는 전자기록에서 확인돼야 합니다.",
+        ),
+        "ADV-001": (
+            "준법감시 담당자",
+            "원금·수익을 보장하는 단정적 표현을 즉시 중단하고 문구의 사용 경위와 정정 범위를 검토하세요.",
+            "문제 표현이 삭제·정정되고 준법 검토가 완료된 문서로 재검증해야 합니다.",
+        ),
+        "DOC-001": (
+            "판매 담당자",
+            "누락된 판매서류 또는 비대면 전자문서·교부 기록을 확보해 판매건에 첨부하세요.",
+            "필수 4종 서류 또는 인정 가능한 전자적 대체 증빙이 모두 확인돼야 합니다.",
+        ),
+        "REC-001": (
+            "영업점 관리자",
+            "해당 판매건의 녹취 대상 여부를 확인하고 실제 녹취 파일과 보관 기록을 점검하세요.",
+            "적용 대상이면 녹취 파일의 존재·식별번호·보관 위치가 확인돼야 합니다.",
+        ),
+    }
+    role, required, criteria = actions.get(
+        check.rule_id,
+        ("판매 담당자", check.suggestion or "관련 서류와 내부 기준을 확인하세요.", "보완 후 재검증을 통과해야 합니다."),
+    )
+    return RemediationAction(
+        required_action=required,
+        responsible_role=role,
+        sale_blocking=blocking,
+        completion_criteria=criteria,
+    )
+
+
+def _structured_evidence(
+    check: RuleCheck,
+    documents: list[ParsedDocument],
+    profile_min_grade: dict[str, int] | None = None,
+    elderly_investor: bool = False,
+    non_face_to_face: bool = False,
+) -> list[EvidenceRef]:
+    """기존 판정 로직을 바꾸지 않고, 그 판정에 사용된 입력을 구조화한다."""
+    items: list[EvidenceRef] = []
+
+    if check.rule_id == "PKG-001":
+        codes = _documents_with(documents, "product_code")
+        names = _documents_with(documents, "product_name")
+        selected = codes if len(codes) >= 2 else names
+        field_name = "product_code" if len(codes) >= 2 else "product_name"
+        items.extend(_field_evidence(document, field_name) for document, _ in selected)
+        if len(selected) < 2:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                field_name=field_name,
+                excerpt="비교 가능한 상품 식별값이 2개 미만입니다.",
+            ))
+
+    elif check.rule_id == "FIT-001":
+        profiles = _documents_with(documents, "customer_profile")
+        risks = _documents_with(documents, "product_risk_level")
+        table = profile_min_grade or DEFAULT_PROFILE_MIN_ALLOWED_GRADE
+        if profiles:
+            profile_doc, _ = max(
+                profiles, key=lambda pair: (table.get(pair[1], 0), pair[0].document_id)
+            )
+            items.append(_field_evidence(profile_doc, "customer_profile"))
+        else:
+            docs = [d for d in documents if d.doc_type == "suitability_form"]
+            items.extend(_field_evidence(d, "customer_profile") for d in docs)
+            if not docs:
+                items.append(_missing_document_evidence("suitability_form"))
+        if risks:
+            risk_doc, _ = min(
+                risks, key=lambda pair: (_risk_number(pair[1]) or 99, pair[0].document_id)
+            )
+            items.append(_field_evidence(risk_doc, "product_risk_level"))
+        else:
+            docs = [d for d in documents if d.doc_type == "product_description"]
+            items.extend(_field_evidence(d, "product_risk_level") for d in docs)
+            if not docs:
+                items.append(_missing_document_evidence("product_description"))
+
+    elif check.rule_id == "EXP-001":
+        products = sorted(
+            [d for d in documents if d.doc_type == "product_description"],
+            key=lambda d: d.document_id,
+        )
+        if not products:
+            items.append(_missing_document_evidence("product_description"))
+        field_names = (
+            "principal_loss_explained", "risk_level_explained", "fees_explained"
+        )
+        for document in products:
+            items.extend(_field_evidence(document, name) for name in field_names)
+
+    elif check.rule_id == "ADV-001":
+        targets = sorted(
+            [d for d in documents if d.doc_type in _ADVICE_DOC_TYPES],
+            key=lambda d: d.document_id,
+        )
+        for document in targets:
+            for claim in find_guarantee_claims(document.raw_text)[:3]:
+                items.append(EvidenceRef(
+                    evidence_type="text",
+                    document_id=document.document_id,
+                    excerpt=claim,
+                    search_text=claim,
+                ))
+        if check.status is not CheckStatus.PASS and not items:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                excerpt="검사 가능한 상품설명서·가입신청서·설명확인서가 부족합니다.",
+            ))
+
+    elif check.rule_id == "DOC-001":
+        present = {d.doc_type for d in documents}
+        for doc_type in REQUIRED_DOC_TYPES:
+            if doc_type not in present:
+                items.append(_missing_document_evidence(doc_type))
+        if non_face_to_face and check.status is CheckStatus.WARNING:
+            for document, _ in _documents_with(documents, "customer_acknowledgement"):
+                items.append(_field_evidence(document, "customer_acknowledgement"))
+
+    elif check.rule_id == "DATE-001":
+        explanations = _documents_with(documents, "explanation_date")
+        contracts = _documents_with(documents, "contract_date")
+        valid_explanations = [
+            (parse_iso_date(value), document)
+            for document, value in explanations if parse_iso_date(value)
+        ]
+        valid_contracts = [
+            (parse_iso_date(value), document)
+            for document, value in contracts if parse_iso_date(value)
+        ]
+        if valid_explanations:
+            _, document = max(valid_explanations, key=lambda pair: (pair[0], pair[1].document_id))
+            items.append(_field_evidence(document, "explanation_date"))
+        elif explanations:
+            items.append(_field_evidence(explanations[0][0], "explanation_date"))
+        else:
+            ack_docs = [d for d in documents if d.doc_type == "acknowledgement"]
+            items.extend(_field_evidence(d, "explanation_date") for d in ack_docs)
+        if valid_contracts:
+            _, document = min(valid_contracts, key=lambda pair: (pair[0], pair[1].document_id))
+            items.append(_field_evidence(document, "contract_date"))
+        elif contracts:
+            items.append(_field_evidence(contracts[0][0], "contract_date"))
+        else:
+            date_docs = [d for d in documents if d.doc_type in ("application", "acknowledgement")]
+            items.extend(_field_evidence(d, "contract_date") for d in date_docs)
+
+    elif check.rule_id == "ACK-001":
+        acknowledgements = _documents_with(documents, "customer_acknowledgement")
+        negatives = [pair for pair in acknowledgements if _is_negative_ack(pair[1])]
+        selected = negatives[0] if negatives else (acknowledgements[0] if acknowledgements else None)
+        if selected:
+            items.append(_field_evidence(selected[0], "customer_acknowledgement"))
+        else:
+            ack_docs = [d for d in documents if d.doc_type in ("acknowledgement", "application")]
+            items.extend(_field_evidence(d, "customer_acknowledgement") for d in ack_docs)
+        staff = _documents_with(documents, "staff_name")
+        if staff:
+            items.append(_field_evidence(staff[0][0], "staff_name"))
+        elif check.status is CheckStatus.WARNING:
+            for document in documents:
+                if _field_object(document, "staff_name") is not None:
+                    items.append(_field_evidence(document, "staff_name"))
+
+    elif check.rule_id == "REC-001":
+        risks = _documents_with(documents, "product_risk_level")
+        for document, value in risks:
+            grade = _risk_number(value)
+            if grade in RECORDING_RISK_GRADES or check.status is CheckStatus.PASS:
+                items.append(_field_evidence(document, "product_risk_level"))
+        suitability = check_suitability(documents, profile_min_grade=profile_min_grade)
+        if suitability.status is CheckStatus.RISK:
+            profiles = _documents_with(documents, "customer_profile")
+            if profiles:
+                items.append(_field_evidence(profiles[0][0], "customer_profile"))
+        if elderly_investor:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                field_name="elderly_investor",
+                value="예",
+                excerpt="검토자가 만 65세 이상 투자자로 표시함",
+            ))
+        if check.status is CheckStatus.WARNING:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                field_name="recording_record",
+                excerpt="이 도구는 녹취 파일 자체를 판독하지 않으므로 보관 기록 확인이 필요합니다.",
+            ))
+
+    return _dedupe_evidence(items)
+
+
+def _enrich_check(
+    check: RuleCheck,
+    documents: list[ParsedDocument],
+    profile_min_grade: dict[str, int] | None = None,
+    elderly_investor: bool = False,
+    non_face_to_face: bool = False,
+) -> RuleCheck:
+    check.evidence_items = _structured_evidence(
+        check,
+        documents,
+        profile_min_grade=profile_min_grade,
+        elderly_investor=elderly_investor,
+        non_face_to_face=non_face_to_face,
+    )
+    check.action_plan = _official_action(check)
+    return check
+
 def run_package_checks(
     documents: list[ParsedDocument],
     profile_min_grade: dict[str, int] | None = None,
@@ -835,4 +1129,13 @@ def run_package_checks(
             profile_min_grade=profile_min_grade,
         )
     )
-    return checks
+    return [
+        _enrich_check(
+            check,
+            documents,
+            profile_min_grade=profile_min_grade,
+            elderly_investor=elderly_investor,
+            non_face_to_face=non_face_to_face,
+        )
+        for check in checks
+    ]

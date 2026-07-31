@@ -29,7 +29,12 @@ def _fallback_issue(check: RuleCheck) -> LegalIssue:
         rule_id=check.rule_id,
         search_query=hint.query,
         rationale=check.document_excerpt or check.description,
-        recommended_action=check.suggestion or "관련 서류와 내부 기준을 확인하세요.",
+        # 공식 조치는 결정론적 규칙이 소유한다. LLM은 검색 질의·쟁점 설명만 보조한다.
+        recommended_action=(
+            check.action_plan.required_action
+            if check.action_plan
+            else check.suggestion or "관련 서류와 내부 기준을 확인하세요."
+        ),
         used_llm=False,
     )
 
@@ -90,10 +95,10 @@ def build_legal_issues(
 각 rule_id마다 다음만 생성하세요.
 - search_query: 국가법령정보/RAG 검색에 사용할 구체적인 한국어 질의
 - rationale: 제공된 서류 사실만 이용한 짧은 설명
-- recommended_action: 추가 확인 조치
+공식 조치·담당자·판매 차단 여부는 규칙 엔진이 정하므로 생성하지 마세요.
 
 JSON 객체만 출력하세요.
-{{"issues":[{{"rule_id":"FIT-001","search_query":"...","rationale":"...","recommended_action":"..."}}]}}
+{{"issues":[{{"rule_id":"FIT-001","search_query":"...","rationale":"..."}}]}}
 
 서류 구조화 사실:
 {json.dumps(facts, ensure_ascii=False)}
@@ -128,14 +133,13 @@ JSON 객체만 출력하세요.
                 continue
             query = str(item.get("search_query", "")).strip()
             rationale = str(item.get("rationale", "")).strip()
-            action = str(item.get("recommended_action", "")).strip()
             if not query:
                 continue
             fallback[rule_id] = LegalIssue(
                 rule_id=rule_id,
                 search_query=query[:300],
                 rationale=(rationale or fallback[rule_id].rationale)[:800],
-                recommended_action=(action or fallback[rule_id].recommended_action)[:800],
+                recommended_action=fallback[rule_id].recommended_action[:800],
                 used_llm=True,
             )
     except Exception:
