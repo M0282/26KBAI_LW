@@ -157,6 +157,22 @@ def _evidence_hits(evidence: EvidenceRef, pdf_details: dict) -> list[dict]:
     return []
 
 
+def _renderable_pdf(document_id: str, pdf_details: dict, pdf_bytes_map: dict) -> bytes | None:
+    """하이라이트 렌더링에 넘길 PDF 바이트를 고른다.
+
+    업로드 원본을 그대로 넘기면 안 된다 — JPG·PNG 로 올린 서류는 PDF가 아니라서
+    fitz 가 ValueError("is no PDF") 로 죽고 화면 전체가 예외로 멈춘다(실측).
+    판독 단계에서 이미지는 이미 PDF로 변환해 두므로(PdfDocument.pdf_bytes) 그것을 쓴다.
+    """
+    pdf = pdf_details.get(document_id)
+    converted = getattr(pdf, "pdf_bytes", None)
+    if converted:
+        return converted
+    # 변환본이 없으면 원본이 진짜 PDF일 때만 쓴다. 아니면 렌더링하지 않는다.
+    raw = pdf_bytes_map.get(document_id)
+    return raw if raw and raw[:5] == b"%PDF-" else None
+
+
 def _evidence_payload(evidence: EvidenceRef, pdf_details: dict) -> dict:
     payload = evidence.model_dump()
     payload["locations"] = _evidence_hits(evidence, pdf_details)
@@ -205,12 +221,16 @@ def _render_rule_evidence(
 
         toggle_key = f"evidence::{active_slot}::{check.rule_id}::{index}"
         if st.toggle("원문 근거 보기", key=toggle_key):
+            source = _renderable_pdf(evidence.document_id, pdf_details, pdf_bytes_map)
+            if not source:
+                st.caption("이 서류는 원문 페이지를 그려낼 수 없습니다(변환본 없음).")
+                continue
             preferred = next(
                 (hit for hit in hits if evidence.page and hit["page"] == evidence.page),
                 hits[0],
             )
             image = render_highlighted_page(
-                pdf_bytes_map[evidence.document_id],
+                source,
                 page_number=preferred["page"],
                 rects=preferred["rects"],
             )
@@ -226,22 +246,6 @@ def _render_rule_evidence(
                 "동일 문구가 여러 페이지에 있으면 JSON의 document_evidence.items.locations에 "
                 "모든 좌표가 함께 기록됩니다."
             )
-
-
-def _render_action_plan(check: RuleCheck) -> None:
-    action = check.action_plan
-    if not action:
-        st.success("추가 조치 없음")
-        return
-    blocking = "예 — 조치 완료 전 판매 중단" if action.sale_blocking else "아니오 — 확인 후 진행 가능"
-    st.markdown("**필요한 조치**")
-    st.markdown(
-        f'<div class="kb-evidence"><b>담당:</b> {html.escape(action.responsible_role)}<br>'
-        f'<b>조치:</b> {html.escape(action.required_action)}<br>'
-        f'<b>판매 차단:</b> {html.escape(blocking)}<br>'
-        f'<b>완료 기준:</b> {html.escape(action.completion_criteria)}</div>',
-        unsafe_allow_html=True,
-    )
 
 
 st.set_page_config(page_title="KB 금융상품 판매서류 검증 AI Copilot", page_icon="🛡️", layout="wide")
@@ -818,9 +822,10 @@ for check in checks:
         source_label = "AI 쟁점 설명" if issue.used_llm else "규칙 기반 설명(LLM 미사용)"
         st.markdown(f"**{source_label}:** {html.escape(issue.rationale)}")
         # 이 건에서 구체적으로 무엇을 확인할지(LLM이 서류 값에 맞춰 좁혀 준 안내).
+        # 담당자·판매 차단·완료 기준은 위쪽 '조치 필요 항목 요약' 표에서 한눈에 본다 —
+        # 규칙마다 같은 상자를 반복하면 정작 읽어야 할 건별 문구가 묻힌다.
+        st.markdown("**필요한 조치**")
         st.info(issue.recommended_action)
-        # 담당자·판매 차단·완료 기준은 규칙 엔진이 정한 공식 조치다.
-        _render_action_plan(check)
         # 원문 근거는 조치 안내 다음, 법령 근거 앞에 둔다.
         _render_rule_evidence(
             check, pdf_details, pdf_bytes_map, active_slot=active_slot
@@ -945,12 +950,17 @@ if selected_value:
         else:
             chosen_page = hit_pages[0]
         hit = next(h for h in hits if h["page"] == chosen_page)
-        image = render_highlighted_page(
-            pdf_bytes_map[selected_doc],
-            page_number=hit["page"],
-            rects=hit["rects"],
-        )
-        st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
+        # 업로드 원본이 JPG·PNG면 그대로 넘길 수 없다 — 변환된 PDF를 쓴다.
+        source = _renderable_pdf(selected_doc, pdf_details, pdf_bytes_map)
+        if source:
+            image = render_highlighted_page(
+                source,
+                page_number=hit["page"],
+                rects=hit["rects"],
+            )
+            st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
+        else:
+            st.caption("이 서류는 원문 페이지를 그려낼 수 없습니다(변환본 없음). 좌표만 아래에 보여줍니다.")
         with st.expander("좌표 데이터"):
             st.json(hits, expanded=False)
     else:
