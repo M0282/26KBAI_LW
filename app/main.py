@@ -136,17 +136,73 @@ st.markdown(
 html, body, .stApp, button, input, textarea, select {{
   font-family:"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;
 }}
-.block-container {{ padding-top:1.25rem; max-width:1500px; }}
-.kb-hero {{ background:white; color:#3a3630; border:1px solid #eee8da; border-radius:22px; padding:24px 28px;
-box-shadow:0 10px 30px rgba(100,91,76,.08); margin-bottom:18px; }}
-.kb-title {{ color:{KB_GRAY}; font-size:2.1rem; font-weight:800; margin:0; }}
+/* Streamlit 상단 고정 헤더와 첫 콘텐츠가 겹치지 않도록 여백을 확보한다. */
+.block-container {{
+  padding-top:3.75rem;
+  max-width:1500px;
+}}
+.kb-hero {{
+  background:white;
+  color:#3a3630;
+  border:1px solid #eee8da;
+  border-radius:22px;
+  padding:28px 28px 24px;
+  box-shadow:0 10px 30px rgba(100,91,76,.08);
+  margin:0 0 18px;
+  overflow:visible;
+}}
+.kb-title {{
+  color:{KB_GRAY};
+  font-size:2.1rem;
+  font-weight:800;
+  line-height:1.28;
+  letter-spacing:-0.02em;
+  margin:0;
+  padding-top:2px;
+}}
 .kb-title b {{ color:{KB_YELLOW}; }}
 .kb-sub {{ color:#655f55; margin-top:8px; font-size:1.02rem; }}
 .kb-badge {{ display:inline-block; border:1px solid {KB_YELLOW}; background:#fff8df; color:{KB_GRAY};
 padding:7px 12px; border-radius:999px; margin-top:13px; font-weight:700; }}
 .kb-card {{ background:white; color:#3a3630; border:1px solid #eee8da; border-radius:18px; padding:18px;
 box-shadow:0 8px 24px rgba(100,91,76,.07); min-height:145px; }}
-.kb-step {{ border-left:5px solid {KB_YELLOW}; }}
+/* 첫 화면의 3단계 안내 박스만 동일한 크기와 KB Yellow 왼쪽 강조선을 적용한다.
+   다른 kb-card와 테마·다크모드 관련 스타일은 변경하지 않는다.
+
+   높이를 px로 고정하면 안 된다 — 창 폭·확대 배율·글꼴이 조금만 달라도 글자가
+   상자 밖으로 흘러넘친다(실측: 1500px/100%에서도 10px, 1280px/125%에서 67px).
+   그리드로 세 칸의 높이를 맞추고, 내용이 길어지면 세 칸이 함께 커지게 한다.
+   제목 크기도 명시한다 — Streamlit 기본 h3는 28px이라 카드 폭에서 줄이 넘친다. */
+.kb-intro-grid {{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:16px;
+  align-items:stretch;
+  margin-top:4px;
+}}
+.kb-intro-card {{
+  width:100%;
+  min-height:175px;
+  box-sizing:border-box;
+  border-left:5px solid {KB_YELLOW};
+  display:flex;
+  flex-direction:column;
+  /* 한글은 어절 단위로 끊는다 — 없으면 '업로 / 드'처럼 낱말 한가운데가 잘린다.
+     overflow-wrap 은 함께 쓰지 않는다. anywhere/break-word 를 주면 좁은 칸에서
+     keep-all 을 무시하고 다시 낱말을 쪼갠다(실측: '판매 건별 업 / 로드'). */
+  word-break:keep-all;
+}}
+/* Streamlit 이 제목·본문에 word-break:break-word 를 '직접' 걸어 두어 상위의
+   keep-all 이 상속되지 않는다(실측). 그래서 여기서 다시 지정한다.
+   overflow-wrap 도 normal 로 되돌려야 낱말을 쪼개지 않는다. */
+.kb-intro-card h3 {{ margin:0 0 14px; font-size:1.2rem; line-height:1.4; font-weight:700;
+  word-break:keep-all; overflow-wrap:normal; }}
+.kb-intro-card p {{ margin:0; font-size:0.9rem; line-height:1.6;
+  word-break:keep-all; overflow-wrap:normal; }}
+@media (max-width: 900px) {{
+  .kb-intro-grid {{ grid-template-columns:1fr; }}
+  .kb-intro-card {{ min-height:0; }}
+}}
 .kb-evidence {{ background:#fff8df; color:#3a3630; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
 .kb-law {{ background:#fcfbf8; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
 padding:10px 14px; border-radius:8px; margin:6px 0 10px; }}
@@ -158,6 +214,12 @@ padding:10px 14px; border-radius:8px; margin:6px 0 10px; }}
    여기서 흰 배경을 깔면 다크모드에서 흰 글자가 흰 바탕에 얹혀 라벨이 사라진다. */
 div[data-testid="stFileUploader"] {{ padding:12px; border-radius:16px; border:1px dashed {KB_YELLOW}; }}
 .stButton button {{ background:{KB_YELLOW}; color:#332c22; border:none; font-weight:800; border-radius:10px; }}
+
+@media (max-width: 768px) {{
+  .block-container {{ padding-top:3.25rem; }}
+  .kb-hero {{ padding:22px 20px 20px; border-radius:18px; }}
+  .kb-title {{ font-size:1.72rem; line-height:1.32; }}
+}}
 </style>
 <div class="kb-hero">
   <div class="kb-title"><b>KB</b> 금융상품 판매서류 검증 <b>AI Copilot</b></div>
@@ -279,13 +341,20 @@ if st.session_state.package_count > 1 and remove_col.button(
     st.rerun()
 
 if not any(uploaded_packages):
-    left, center, right = st.columns(3)
-    with left:
-        st.markdown('<div class="kb-card"><h3>① 판매 건별 업로드</h3><p>상품 계약 하나에 필요한 서류 4종을 한 칸에 올립니다.</p></div>', unsafe_allow_html=True)
-    with center:
-        st.markdown('<div class="kb-card kb-step"><h3>② AI 문서 이해</h3><p>문서 분류, 필드 추출, 표현 정규화와 법적 검색 쟁점을 생성합니다.</p></div>', unsafe_allow_html=True)
-    with right:
-        st.markdown('<div class="kb-card"><h3>③ 근거 기반 판정</h3><p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>', unsafe_allow_html=True)
+    # 세 칸을 st.columns 로 나누면 칸마다 별도 블록이라 높이가 서로 맞지 않는다.
+    # 한 덩어리 그리드로 그려야 세 칸이 항상 같은 높이가 되고, 어느 컴퓨터에서든
+    # 같은 모양이 나온다(칸 높이를 px로 고정할 필요가 없어진다).
+    st.markdown(
+        '<div class="kb-intro-grid">'
+        '<div class="kb-card kb-intro-card"><h3>① 판매 건별 업로드</h3>'
+        '<p>상품 계약 하나에 필요한 서류 4종을 한 칸에 올립니다.</p></div>'
+        '<div class="kb-card kb-intro-card"><h3>② AI 문서 이해</h3>'
+        '<p>문서 분류, 필드 추출, 표현 정규화와 법적 검색 쟁점을 생성합니다.</p></div>'
+        '<div class="kb-card kb-intro-card"><h3>③ 근거 기반 판정</h3>'
+        '<p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 
