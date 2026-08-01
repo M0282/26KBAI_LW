@@ -1,6 +1,7 @@
 """KB 금융상품 판매서류 검증 AI Copilot MVP."""
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -12,6 +13,32 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+
+def _running_under_streamlit() -> bool:
+    """`streamlit run` 으로 실행됐는지. 아니면 화면이 뜨지 않는다.
+
+    streamlit.runtime.exists() 로는 판별할 수 없다 — 1.60의 uvicorn 기반
+    서버에서는 스크립트 실행 중에도 False가 나와서, 그걸 믿고 종료하면
+    앱 전체가 500으로 죽는다(실측). 스크립트 컨텍스트 유무로 판별한다.
+    """
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+    except ImportError:  # 내부 API라 향후 옮겨질 수 있다 — 그때는 검사를 건너뛴다.
+        return True
+    return get_script_run_ctx() is not None
+
+
+# `python app/main.py` 로 실행하면 streamlit이 경고 수십 줄만 쏟아내고 화면은
+# 뜨지 않는다. 무엇을 잘못했는지 알기 어려우므로 여기서 먼저 알려준다.
+if not _running_under_streamlit():
+    print(
+        "\n이 파일은 Streamlit 앱이라 `python` 으로는 실행되지 않습니다.\n"
+        "\n  Windows : run.bat 을 더블클릭하세요 (가장 간단합니다)\n"
+        "  직접 실행: streamlit run app/main.py\n"
+        "\n자세한 안내는 실행안내.md 를 보세요.\n"
+    )
+    raise SystemExit(1)
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -21,7 +48,7 @@ if str(ROOT) not in sys.path:
 load_dotenv(ROOT / ".env", override=False)
 
 from src.common.llm_cache import clear_llm_cache
-from src.common.schemas import CheckStatus, ParsedDocument
+from src.common.schemas import CheckStatus, EvidenceRef, ParsedDocument, RuleCheck
 from src.ingest.law_search import find_legal_basis
 from src.parser.financial_extractor import DOC_TYPES, extract_document, field_map
 from src.parser.pdf_loader import load_pdf, to_parsed_document
@@ -30,13 +57,18 @@ from src.verify.ai_reasoner import build_legal_issues
 from src.verify.financial_rules import (
     DEFAULT_PROFILE_MIN_ALLOWED_GRADE,
     LAW_HINTS,
+    focus_pattern,
+    focused_law_paragraphs,
     run_package_checks,
+    split_law_paragraphs,
 )
 from src.verify.metrics import compute_metrics
 
 KB_YELLOW = "#FCAF17"
 KB_YELLOW_ALT = "#FDB913"
 KB_GRAY = "#645B4C"
+REPORT_SCHEMA_VERSION = "1.2.0"
+RULE_SET_VERSION = "2026-07-31"
 STATUS_LABEL = {
     CheckStatus.PASS: ("통과", "#2E7D32"),
     CheckStatus.WARNING: ("주의", "#B26A00"),
@@ -44,26 +76,272 @@ STATUS_LABEL = {
     CheckStatus.RISK: ("위험", "#C62828"),
 }
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _package_fingerprint(
+    raw_map: dict[str, bytes], *, elderly: bool, nonface: bool,
+    with_llm: bool, live_law: bool,
+) -> str:
+    """파일명 대신 실제 파일 내용과 판정 설정으로 판매 건을 식별한다."""
+    digest = hashlib.sha256()
+    for name in sorted(raw_map):
+        digest.update(name.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        digest.update(raw_map[name])
+        digest.update(b"\0")
+    digest.update(
+        f"elderly={int(elderly)}|nonface={int(nonface)}|"
+        f"llm={int(with_llm)}|live_law={int(live_law)}".encode("ascii")
+    )
+    return digest.hexdigest()
+
+
+def _regulation_corpus_hash() -> str | None:
+    """현재 로컬 법령 조문 묶음의 내용 해시. 재현성 확인용이다."""
+    paths = sorted((ROOT / "data" / "regulations").glob("*.articles.json"))
+    if not paths:
+        return None
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _highlight_law(paragraph: str, focus) -> str:
+    """조문 문장에서 규칙이 걸리는 문구를 형광 표시한다.
+
+    법령 원문은 그대로 보여야 하므로 먼저 이스케이프하고, 그 다음 강조 표시만
+    입힌다(원문에 <, & 가 드물지만 넣지 않을 이유가 없다).
+    """
+    escaped = html.escape(paragraph)
+    pattern = focus_pattern(focus)
+    if not pattern:
+        return escaped
+    # 이스케이프 후 위치가 달라질 수 있는 문자는 강조 문구에 쓰지 않는다(한글·기호뿐).
+    return pattern.sub(lambda m: f"<mark>{m.group(0)}</mark>", escaped)
+
+
+_EVIDENCE_TYPE_LABEL = {
+    "field": "추출 필드",
+    "text": "원문 문구",
+    "missing_field": "필수 항목 미확인",
+    "missing_document": "필수 문서 누락",
+    "manual_review": "수동 확인 필요",
+}
+
+
+def _evidence_hits(evidence: EvidenceRef, pdf_details: dict) -> list[dict]:
+    """구조화 근거를 PDF 좌표와 연결한다.
+
+    원문 문장 → 정규화 값 → 짧은 발췌 순으로 시도한다. LLM 비전 판독값처럼
+    텍스트 레이어에 없는 근거는 빈 목록을 반환하고 화면에서 그 사실을 밝힌다.
+    """
+    if not evidence.document_id or evidence.document_id not in pdf_details:
+        return []
+    pdf = pdf_details[evidence.document_id]
+    candidates = [evidence.search_text, evidence.value, evidence.excerpt]
+    tried: set[str] = set()
+    for candidate in candidates:
+        query = (candidate or "").strip()
+        if not query or query in tried or query.startswith("AI 비전 판독:"):
+            continue
+        tried.add(query)
+        hits = pdf.locate(query)
+        if hits:
+            return hits
+    return []
+
+
+def _renderable_pdf(document_id: str, pdf_details: dict, pdf_bytes_map: dict) -> bytes | None:
+    """하이라이트 렌더링에 넘길 PDF 바이트를 고른다.
+
+    업로드 원본을 그대로 넘기면 안 된다 — JPG·PNG 로 올린 서류는 PDF가 아니라서
+    fitz 가 ValueError("is no PDF") 로 죽고 화면 전체가 예외로 멈춘다(실측).
+    판독 단계에서 이미지는 이미 PDF로 변환해 두므로(PdfDocument.pdf_bytes) 그것을 쓴다.
+    """
+    pdf = pdf_details.get(document_id)
+    converted = getattr(pdf, "pdf_bytes", None)
+    if converted:
+        return converted
+    # 변환본이 없으면 원본이 진짜 PDF일 때만 쓴다. 아니면 렌더링하지 않는다.
+    raw = pdf_bytes_map.get(document_id)
+    return raw if raw and raw[:5] == b"%PDF-" else None
+
+
+def _evidence_payload(evidence: EvidenceRef, pdf_details: dict) -> dict:
+    payload = evidence.model_dump()
+    payload["locations"] = _evidence_hits(evidence, pdf_details)
+    return payload
+
+
+def _render_rule_evidence(
+    check: RuleCheck,
+    pdf_details: dict,
+    pdf_bytes_map: dict[str, bytes],
+    *,
+    active_slot: int,
+) -> None:
+    """규칙별 구조화 근거와 해당 PDF 위치를 같은 자리에서 보여준다.
+
+    요약(서류 근거)은 판정 바로 아래에 두고, 근거 항목과 원문 보기는 조치 안내
+    다음에 둔다. 담당자가 '무엇이 문제인가 → 무엇을 하면 되는가 → 원문 어디인가'
+    순서로 읽도록 화면 순서를 맞춘 것이다.
+    """
+    if not check.evidence_items:
+        return
+
+    st.markdown("**판정 근거**")
+    for index, evidence in enumerate(check.evidence_items, start=1):
+        kind = _EVIDENCE_TYPE_LABEL.get(evidence.evidence_type, evidence.evidence_type)
+        document = evidence.document_id or "판매건 전체"
+        page = f" · {evidence.page}쪽" if evidence.page else ""
+        field = f" · `{evidence.field_name}`" if evidence.field_name else ""
+        value = evidence.value or evidence.excerpt or "미확인"
+        st.markdown(
+            f'<div class="kb-evidence"><b>{index}. {html.escape(kind)}</b> · '
+            f'{html.escape(document)}{html.escape(page)}{field}<br>'
+            f'{html.escape(value)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if evidence.evidence_type not in {"field", "text"} or not evidence.document_id:
+            continue
+        hits = _evidence_hits(evidence, pdf_details)
+        if not hits:
+            st.caption(
+                "이 근거는 추출값으로 기록됐지만 PDF 텍스트 좌표는 찾지 못했습니다. "
+                "스캔·비전 판독값이거나 OCR 공백 차이일 수 있으니 원문을 확인하세요."
+            )
+            continue
+
+        toggle_key = f"evidence::{active_slot}::{check.rule_id}::{index}"
+        if st.toggle("원문 근거 보기", key=toggle_key):
+            source = _renderable_pdf(evidence.document_id, pdf_details, pdf_bytes_map)
+            if not source:
+                st.caption("이 서류는 원문 페이지를 그려낼 수 없습니다(변환본 없음).")
+                continue
+            preferred = next(
+                (hit for hit in hits if evidence.page and hit["page"] == evidence.page),
+                hits[0],
+            )
+            image = render_highlighted_page(
+                source,
+                page_number=preferred["page"],
+                rects=preferred["rects"],
+            )
+            st.image(
+                image,
+                caption=(
+                    f"{evidence.document_id} · {preferred['page']}페이지 · "
+                    f"{evidence.field_name or '원문 문구'} 근거 위치"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "동일 문구가 여러 페이지에 있으면 JSON의 document_evidence.items.locations에 "
+                "모든 좌표가 함께 기록됩니다."
+            )
+
+
 st.set_page_config(page_title="KB 금융상품 판매서류 검증 AI Copilot", page_icon="🛡️", layout="wide")
 st.markdown(
     f"""
 <style>
 :root {{ --kb-yellow:{KB_YELLOW}; --kb-yellow2:{KB_YELLOW_ALT}; --kb-gray:{KB_GRAY}; }}
-.stApp {{ background:linear-gradient(180deg,#fffdf7 0%,#f7f6f2 100%); }}
-.block-container {{ padding-top:1.25rem; max-width:1500px; }}
-.kb-hero {{ background:white; border:1px solid #eee8da; border-radius:22px; padding:24px 28px;
-box-shadow:0 10px 30px rgba(100,91,76,.08); margin-bottom:18px; }}
-.kb-title {{ color:{KB_GRAY}; font-size:2.1rem; font-weight:800; margin:0; }}
+/* 기존 System / Light / Dark 테마 전환을 유지한다.
+   앱 배경을 밝게 강제하지 않아 현재 테마의 배경과 기본 글자색을 그대로 따른다. */
+html, body, .stApp, button, input, textarea, select {{
+  font-family:"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;
+}}
+/* Streamlit 상단 고정 헤더와 첫 콘텐츠가 겹치지 않도록 여백을 확보한다. */
+.block-container {{
+  padding-top:3.75rem;
+  max-width:1500px;
+}}
+.kb-hero {{
+  background:white;
+  color:#3a3630;
+  border:1px solid #eee8da;
+  border-radius:22px;
+  padding:28px 28px 24px;
+  box-shadow:0 10px 30px rgba(100,91,76,.08);
+  margin:0 0 18px;
+  overflow:visible;
+}}
+.kb-title {{
+  color:{KB_GRAY};
+  font-size:2.1rem;
+  font-weight:800;
+  line-height:1.28;
+  letter-spacing:-0.02em;
+  margin:0;
+  padding-top:2px;
+}}
 .kb-title b {{ color:{KB_YELLOW}; }}
 .kb-sub {{ color:#655f55; margin-top:8px; font-size:1.02rem; }}
 .kb-badge {{ display:inline-block; border:1px solid {KB_YELLOW}; background:#fff8df; color:{KB_GRAY};
 padding:7px 12px; border-radius:999px; margin-top:13px; font-weight:700; }}
-.kb-card {{ background:white; border:1px solid #eee8da; border-radius:18px; padding:18px;
+.kb-card {{ background:white; color:#3a3630; border:1px solid #eee8da; border-radius:18px; padding:18px;
 box-shadow:0 8px 24px rgba(100,91,76,.07); min-height:145px; }}
-.kb-step {{ border-left:5px solid {KB_YELLOW}; }}
-.kb-evidence {{ background:#fff8df; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
-div[data-testid="stFileUploader"] {{ background:white; padding:12px; border-radius:16px; border:1px dashed {KB_YELLOW}; }}
+/* 첫 화면의 3단계 안내 박스만 동일한 크기와 KB Yellow 왼쪽 강조선을 적용한다.
+   다른 kb-card와 테마·다크모드 관련 스타일은 변경하지 않는다.
+
+   높이를 px로 고정하면 안 된다 — 창 폭·확대 배율·글꼴이 조금만 달라도 글자가
+   상자 밖으로 흘러넘친다(실측: 1500px/100%에서도 10px, 1280px/125%에서 67px).
+   그리드로 세 칸의 높이를 맞추고, 내용이 길어지면 세 칸이 함께 커지게 한다.
+   제목 크기도 명시한다 — Streamlit 기본 h3는 28px이라 카드 폭에서 줄이 넘친다. */
+.kb-intro-grid {{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:16px;
+  align-items:stretch;
+  margin-top:4px;
+}}
+.kb-intro-card {{
+  width:100%;
+  min-height:175px;
+  box-sizing:border-box;
+  border-left:5px solid {KB_YELLOW};
+  display:flex;
+  flex-direction:column;
+  /* 한글은 어절 단위로 끊는다 — 없으면 '업로 / 드'처럼 낱말 한가운데가 잘린다.
+     overflow-wrap 은 함께 쓰지 않는다. anywhere/break-word 를 주면 좁은 칸에서
+     keep-all 을 무시하고 다시 낱말을 쪼갠다(실측: '판매 건별 업 / 로드'). */
+  word-break:keep-all;
+}}
+/* Streamlit 이 제목·본문에 word-break:break-word 를 '직접' 걸어 두어 상위의
+   keep-all 이 상속되지 않는다(실측). 그래서 여기서 다시 지정한다.
+   overflow-wrap 도 normal 로 되돌려야 낱말을 쪼개지 않는다. */
+.kb-intro-card h3 {{ margin:0 0 14px; font-size:1.2rem; line-height:1.4; font-weight:700;
+  word-break:keep-all; overflow-wrap:normal; }}
+.kb-intro-card p {{ margin:0; font-size:0.9rem; line-height:1.6;
+  word-break:keep-all; overflow-wrap:normal; }}
+@media (max-width: 900px) {{
+  .kb-intro-grid {{ grid-template-columns:1fr; }}
+  .kb-intro-card {{ min-height:0; }}
+}}
+.kb-evidence {{ background:#fff8df; color:#3a3630; border-left:4px solid {KB_YELLOW}; padding:10px 12px; border-radius:8px; }}
+.kb-law {{ background:#fcfbf8; border:1px solid #eee8da; border-left:4px solid {KB_GRAY};
+padding:10px 14px; border-radius:8px; margin:6px 0 10px; }}
+.kb-law p {{ margin:0 0 8px; font-size:0.9rem; line-height:1.62; color:#3a3630; }}
+.kb-law p:last-child {{ margin-bottom:0; }}
+.kb-law mark {{ background:{KB_YELLOW}; color:#241f18; padding:1px 2px; border-radius:3px; font-weight:700; }}
+.kb-law-full p {{ font-size:0.83rem; color:#5a544b; }}
+/* 업로더는 배경을 칠하지 않는다. 안쪽 글자는 Streamlit이 테마 색으로 그리므로
+   여기서 흰 배경을 깔면 다크모드에서 흰 글자가 흰 바탕에 얹혀 라벨이 사라진다. */
+div[data-testid="stFileUploader"] {{ padding:12px; border-radius:16px; border:1px dashed {KB_YELLOW}; }}
 .stButton button {{ background:{KB_YELLOW}; color:#332c22; border:none; font-weight:800; border-radius:10px; }}
+
+@media (max-width: 768px) {{
+  .block-container {{ padding-top:3.25rem; }}
+  .kb-hero {{ padding:22px 20px 20px; border-radius:18px; }}
+  .kb-title {{ font-size:1.72rem; line-height:1.32; }}
+}}
 </style>
 <div class="kb-hero">
   <div class="kb-title"><b>KB</b> 금융상품 판매서류 검증 <b>AI Copilot</b></div>
@@ -130,6 +408,8 @@ st.info(
     "① **적합성 진단표** — 고객 투자성향 ② **상품설명서**(투자설명서) — 상품 위험등급 "
     "③ **가입신청서**(계약서) — 계약일·서명 ④ **설명 확인서** — 설명 이행 확인\n\n"
     "서류가 빠지면 그 항목은 검증할 수 없어 '누락'으로 표시됩니다. "
+    "**비대면(모바일) 가입은 ④ 설명 확인서가 별도 파일로 없습니다** — 아래 체크박스를 "
+    "표시하면 계약서의 확인 문구와 전자서명을 증빙으로 인정합니다.\n\n"
     "여러 계약을 검증하려면 아래 **판매 건 추가**로 칸을 늘리세요 — 칸별로 따로 판정합니다."
 )
 
@@ -158,6 +438,17 @@ for slot in range(st.session_state.package_count):
             key=f"elderly_{slot}",
             help="해당하면 고위험 상품이 아니어도 녹취 의무 대상일 수 있습니다.",
         )
+        # 판매 채널도 서류에서 읽히지 않는다. 비대면은 설명확인서가 별도 파일로
+        # 존재하지 않고 계약서의 확인 문구 + 전자서명이 그 역할을 하므로,
+        # 표시된 건에서만 '서류 누락'을 '확인 사항'으로 낮춘다.
+        st.checkbox(
+            "이 건은 비대면(모바일·인터넷) 가입입니다",
+            key=f"nonface_{slot}",
+            help="비대면은 설명 확인서가 별도 파일로 없고 계약서의 확인 문구와 전자서명이 "
+            "그 역할을 합니다. 체크하면 설명 확인서가 없어도 '누락'이 아니라 '주의'로 "
+            "표시하고, 전자문서함 기록을 함께 확인하도록 안내합니다. "
+            "영업점 판매라면 체크하지 마세요 — 그때는 확인서가 실제로 있어야 합니다.",
+        )
         uploaded_packages.append(list(files or []))
 
 add_col, remove_col, _ = st.columns([1, 1, 4])
@@ -172,13 +463,20 @@ if st.session_state.package_count > 1 and remove_col.button(
     st.rerun()
 
 if not any(uploaded_packages):
-    left, center, right = st.columns(3)
-    with left:
-        st.markdown('<div class="kb-card"><h3>① 판매 건별 업로드</h3><p>상품 계약 하나에 필요한 서류 4종을 한 칸에 올립니다.</p></div>', unsafe_allow_html=True)
-    with center:
-        st.markdown('<div class="kb-card kb-step"><h3>② AI 문서 이해</h3><p>문서 분류, 필드 추출, 표현 정규화와 법적 검색 쟁점을 생성합니다.</p></div>', unsafe_allow_html=True)
-    with right:
-        st.markdown('<div class="kb-card"><h3>③ 근거 기반 판정</h3><p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>', unsafe_allow_html=True)
+    # 세 칸을 st.columns 로 나누면 칸마다 별도 블록이라 높이가 서로 맞지 않는다.
+    # 한 덩어리 그리드로 그려야 세 칸이 항상 같은 높이가 되고, 어느 컴퓨터에서든
+    # 같은 모양이 나온다(칸 높이를 px로 고정할 필요가 없어진다).
+    st.markdown(
+        '<div class="kb-intro-grid">'
+        '<div class="kb-card kb-intro-card"><h3>① 판매 건별 업로드</h3>'
+        '<p>상품 계약 하나에 필요한 서류 4종을 한 칸에 올립니다.</p></div>'
+        '<div class="kb-card kb-intro-card"><h3>② AI 문서 이해</h3>'
+        '<p>문서 분류, 필드 추출, 표현 정규화와 법적 검색 쟁점을 생성합니다.</p></div>'
+        '<div class="kb-card kb-intro-card"><h3>③ 근거 기반 판정</h3>'
+        '<p>결정론적 규칙으로 판정하고 서류 원문과 관련 조문을 함께 보여줍니다.</p></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 
@@ -200,19 +498,37 @@ def process_document(raw_bytes: bytes, file_name: str, with_llm: bool, forced_ty
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def verify_package(document_payloads: tuple[str, ...], with_llm: bool, elderly: bool = False):
+def verify_package(document_payloads: tuple[str, ...], with_llm: bool, elderly: bool = False,
+                   non_face_to_face: bool = False):
     """패키지 판정·쟁점 생성. 문서 내용이 같으면 재실행하지 않는다."""
     documents = [ParsedDocument.model_validate_json(p) for p in document_payloads]
-    package_checks = run_package_checks(documents, elderly_investor=elderly)
+    package_checks = run_package_checks(
+        documents, elderly_investor=elderly, non_face_to_face=non_face_to_face
+    )
     return package_checks, build_legal_issues(documents, package_checks, use_llm=with_llm)
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def legal_basis(query: str, articles: tuple[str, ...], sources: tuple[str, ...], live: bool):
+def legal_basis(query: str, articles: tuple[str, ...], sources: tuple[str, ...], live: bool,
+                focus: tuple[str, ...] = (), basis: tuple[tuple[str, str], ...] = ()):
     return find_legal_basis(
         query, preferred_articles=articles, preferred_sources=sources,
-        top_k=3, allow_live=live,
+        top_k=3, allow_live=live, focus=focus, basis=basis,
     )
+
+
+def FIELD_SOURCE_TYPE(field) -> str:
+    """JSON 재사용을 위한 고정 코드. 화면용 한글 라벨과 분리한다."""
+    if not field.value:
+        return "unavailable"
+    confidence = field.confidence or 0.0
+    if confidence >= 0.9:
+        return "deterministic_scan"
+    if confidence >= 0.8:
+        return "ai_vision"
+    if confidence >= 0.5:
+        return "grounded_match"
+    return "ai_extraction"
 
 
 def FIELD_SOURCE_LABEL(field) -> str:
@@ -292,6 +608,7 @@ for order, slot in enumerate(active_slots, start=1):
             tuple(d.model_dump_json() for d in documents),
             use_llm,
             bool(st.session_state.get(f"elderly_{slot}")),
+            bool(st.session_state.get(f"nonface_{slot}")),
         )
         if documents else ([], {})
     )
@@ -299,6 +616,7 @@ for order, slot in enumerate(active_slots, start=1):
         "slot": slot,
         "label": f"판매 건 {slot + 1}",
         "elderly": bool(st.session_state.get(f"elderly_{slot}")),
+        "nonface": bool(st.session_state.get(f"nonface_{slot}")),
         "documents": documents,
         "pdfs": pdfs,
         "raw": raw_map,
@@ -306,6 +624,7 @@ for order, slot in enumerate(active_slots, start=1):
         "errors": failures,
         "checks": slot_checks,
         "issues": slot_issues,
+        "uploaded_count": len(uploaded_packages[slot]),
     })
 progress.empty()
 
@@ -332,16 +651,31 @@ if len(packages) > 1:
         product = next(
             (v for d in package["documents"] if (v := field_map(d).get("product_name"))), "상품 미상"
         )
+        # 판매 후 책임을 따지거나 서류를 고칠 때 '누가 설명했는가'가 근거가 된다.
+        # 판매 건이 여러 개면 상품별로 담당자를 바로 볼 수 있어야 한다.
+        # 서류마다 담당자가 다르게 적혀 있으면 그것 자체가 확인할 신호이므로
+        # 하나로 합치지 않고 그대로 나열한다.
+        staff = list(dict.fromkeys(
+            v for d in package["documents"] if (v := field_map(d).get("staff_name"))
+        ))
+        if staff:
+            staff_text = " / ".join(staff)
+        elif package["nonface"]:
+            staff_text = "— (비대면)"      # 사람 담당자가 없는 것이 정상
+        else:
+            staff_text = "미확인"           # 대면인데 서류에 없다 = 책임 소재가 빈다
         summary_rows.append({
             "판매 건": package["label"],
             "상품": product,
             "고령투자자": "예" if package["elderly"] else "—",
+            "판매채널": "비대면" if package["nonface"] else "대면",
             "종합 판정": verdict,
             "위험": counts[CheckStatus.RISK],
             "누락": counts[CheckStatus.MISSING],
             "주의": counts[CheckStatus.WARNING],
             "통과": counts[CheckStatus.PASS],
             "서류": len(package["documents"]),
+            "설명 담당자": staff_text,
         })
     st.dataframe(summary_rows, hide_index=True, use_container_width=True)
 
@@ -457,43 +791,170 @@ for col, status in zip(metric_cols, [CheckStatus.PASS, CheckStatus.WARNING, Chec
     label, _ = STATUS_LABEL[status]
     col.metric(label, summary_counts[status])
 
+# 표는 세 가지만 답한다 — 무엇이 걸렸나 / 지금 팔아도 되나 / 무엇을 하면 되나.
+#
+# 예전에는 우선순위·판매 차단·담당자 열이 더 있었는데 정보를 더하지 않았다(실측).
+#   우선순위(즉시/확인) = 판매 차단을 다른 말로 쓴 것 — 두 값이 어긋난 행 0건
+#   판매 차단(예/아니오) = 상태(누락·위험)에서 그대로 유도 — 설명되지 않는 행 0건
+# 같은 사실이 세 열에 반복되면서 정작 읽어야 할 '필요한 조치'가 좁아졌다.
+# 상태 한 열에 판매 가능 여부까지 담고, 남은 폭은 조치 문구에 준다.
+action_rows = []
+for check in checks:
+    action = check.action_plan
+    if not action:
+        continue
+    # 이 건에 맞춘 구체 문구를 먼저 쓴다. 규칙의 공식 조치는 모든 건에 같은 문장이라
+    # 표에서는 무엇을 봐야 하는지가 드러나지 않는다.
+    issue = issues.get(check.rule_id)
+    specific = (issue.recommended_action or "").strip() if issue else ""
+    status_text = STATUS_LABEL[check.status][0]
+    action_rows.append({
+        "규칙": check.rule_id,
+        "상태": f"{status_text} · 판매 중단" if action.sale_blocking else f"{status_text} · 확인 후 진행",
+        "필요한 조치": specific or action.required_action,
+        "_blocking": action.sale_blocking,
+    })
+if action_rows:
+    st.markdown("#### 조치 필요 항목 요약")
+    action_rows.sort(key=lambda row: (not row["_blocking"], row["규칙"]))
+    st.dataframe(
+        [{k: v for k, v in row.items() if not k.startswith("_")} for row in action_rows],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "규칙": st.column_config.TextColumn(width="small"),
+            "상태": st.column_config.TextColumn(width="small"),
+            "필요한 조치": st.column_config.TextColumn(width="large"),
+        },
+    )
+    # 담당 배정은 규칙마다 고정이라 행마다 반복할 이유가 없다. 이 판매 건에 실제로
+    # 걸린 규칙의 배정만 한 줄로 적는다.
+    routing: dict[str, list[str]] = {}
+    for check in checks:
+        if check.action_plan:
+            routing.setdefault(check.action_plan.responsible_role, []).append(check.rule_id)
+    if routing:
+        st.caption(
+            "담당 배정 — "
+            + " / ".join(
+                f"{role}: {', '.join(sorted(rules))}" for role, rules in sorted(routing.items())
+            )
+            + ".  서류에 기재된 설명 담당자 이름은 위 '1. AI 문서 분류·핵심 필드 추출'의"
+            " staff_name 에서 서류별로 확인하세요."
+        )
+else:
+    st.success("현재 검사 범위에서 추가 조치가 필요한 항목이 없습니다.")
+
+# 규칙별 근거 조문을 모아 둔다. 화면과 내보내기가 같은 근거를 담아야 한다.
+legal_basis_by_rule: dict[str, list[dict]] = {}
+
 for check in checks:
     label, color = STATUS_LABEL[check.status]
     issue = issues[check.rule_id]
     with st.expander(f"[{label}] {check.rule_id} · {check.description}", expanded=check.status != CheckStatus.PASS):
         st.markdown(f"**판정:** <span style='color:{color};font-weight:800'>{label}</span>", unsafe_allow_html=True)
         if check.document_excerpt:
-            st.markdown(f'<div class="kb-evidence"><b>서류 근거</b><br>{html.escape(check.document_excerpt)}</div>', unsafe_allow_html=True)
-        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다(같은 자리에 성격이 다른 두 가지가 온다).
+            st.markdown(
+                f'<div class="kb-evidence"><b>서류 근거</b><br>'
+                f'{html.escape(check.document_excerpt)}</div>',
+                unsafe_allow_html=True,
+            )
+        # 설명이 LLM이 쓴 것인지 미리 정해둔 폴백 문구인지 밝힌다.
         source_label = "AI 쟁점 설명" if issue.used_llm else "규칙 기반 설명(LLM 미사용)"
         st.markdown(f"**{source_label}:** {html.escape(issue.rationale)}")
+        # 이 건에서 구체적으로 무엇을 확인할지(LLM이 서류 값에 맞춰 좁혀 준 안내).
+        # 담당자·판매 차단·완료 기준은 위쪽 '조치 필요 항목 요약' 표에서 한눈에 본다 —
+        # 규칙마다 같은 상자를 반복하면 정작 읽어야 할 건별 문구가 묻힌다.
+        st.markdown("**필요한 조치**")
         st.info(issue.recommended_action)
+        # 원문 근거는 조치 안내 다음, 법령 근거 앞에 둔다.
+        _render_rule_evidence(
+            check, pdf_details, pdf_bytes_map, active_slot=active_slot
+        )
 
         hint = LAW_HINTS[check.rule_id]
         legal_results = legal_basis(
-            issue.search_query, hint.preferred_articles, hint.preferred_sources, live_law
+            issue.search_query, hint.preferred_articles, hint.preferred_sources, live_law,
+            focus=hint.grounding, basis=hint.basis,
         )
         # 근거 조문을 판정 객체에 실어둔다. 화면에서만 존재하면 결과를 내보내는 순간
         # 근거가 사라진다(스키마가 evidence_clause를 약속해두고 아무도 채우지 않았다).
+        #
+        # 담는 것은 '규칙이 걸리는 항'이다. 예전에는 조문 앞 700자를 잘라 넣었는데,
+        # 금소법 19조는 ①항(상품 유형별 설명 항목)만으로 700자를 넘어서 정작
+        # 설명 확인 의무(②항)가 기록에서 빠졌다(실측). 내보내기 파일은 사후
+        # 입증에 쓰는 기록이라 화면과 같은 근거가 담겨야 한다.
         if legal_results:
             check.evidence_clause = legal_results[0].citation
-            check.evidence_text = legal_results[0].text[:700]
+            focused_basis = focused_law_paragraphs(legal_results[0].text, hint.focus)
+            check.evidence_text = (
+                "\n".join(focused_basis) if focused_basis
+                else legal_results[0].text[:700]
+            )
+            # 근거가 여러 조문이면 전부 기록한다. 화면에는 법률 조문과 그 위임을
+            # 받은 감독규정이 함께 뜨는데(EXP-001은 3건), 기록에 첫 건만 남으면
+            # 그 기록으로는 판정을 설명할 수 없다.
+            legal_basis_by_rule[check.rule_id] = [
+                {
+                    "citation": r.citation,
+                    "title": r.title,
+                    "origin": r.origin,
+                    "applied_text": "\n".join(focused_law_paragraphs(r.text, hint.focus)),
+                }
+                for r in legal_results
+            ]
         if legal_results:
-            st.markdown("**관련 법령 원문 후보** (검색 상위 3건, 첫 번째가 최우선 근거)")
+            hint = LAW_HINTS.get(check.rule_id)
+            focus = hint.focus if hint else ()
+            # 검색 결과는 이미 '이 규칙과 연결되는 조문'만 온다(개수를 채우지 않는다).
+            label = "근거 조문" if len(legal_results) == 1 else f"근거 조문 {len(legal_results)}건"
+            st.markdown(f"**{label}** (판정과 직접 연결되는 부분을 표시합니다)")
             for rank, result in enumerate(legal_results, start=1):
-                tag = "최우선 근거" if rank == 1 else f"참고 {rank}"
+                tag = "최우선 근거" if rank == 1 else f"근거 {rank}"
                 st.markdown(f"- `{tag}` **{result.citation}** · {result.title} · 출처 `{result.origin}`")
-                # 조문 원문은 길어서 펼침으로 둔다(판정 화면이 법령 본문에 묻히지 않도록).
-                if result.text:
-                    with st.expander(f"{result.citation} 원문 보기"):
-                        st.caption(result.text[:700])
+                if not result.text:
+                    continue
+                # 조문 전체를 던지면 '그래서 어디가 문제냐'에 답하지 못한다.
+                # 이 규칙이 걸리는 항만 뽑아 문구를 강조해 먼저 보여준다.
+                # (예전에는 앞 700자만 잘라 보여줬는데, 금소법 19조의 설명 확인
+                #  의무는 ②항이라 그 문장이 화면에 아예 나오지 않았다.)
+                focused = focused_law_paragraphs(result.text, focus)
+                if focused:
+                    st.markdown(
+                        '<div class="kb-law">'
+                        + "".join(f"<p>{_highlight_law(p, focus)}</p>" for p in focused)
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    # 연결되는 조문이 하나도 없을 때만 점수 상위 1건이 여기로 온다.
+                    st.caption(
+                        "이 조문에서 규칙과 직접 연결되는 문구를 찾지 못했습니다 — "
+                        "확인의 출발점으로만 보세요."
+                    )
+                with st.expander(f"{result.citation} 조문 전체 보기"):
+                    st.markdown(
+                        '<div class="kb-law kb-law-full">'
+                        + "".join(
+                            f"<p>{_highlight_law(p, focus)}</p>"
+                            for p in split_law_paragraphs(result.text)
+                        )
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
         else:
             st.warning("법령 청크가 없습니다. `python -m src.ingest.fetch_regulations` 실행 또는 LAW_API_OC 설정이 필요합니다.")
 
 st.subheader("3. 정량 지표")
 # 캐시 도입 후 재실행 시간은 0에 가깝다. 지표에는 '첫 처리 시간'을 유지해야
 # 수작업 대비 절감이 정직한 숫자가 된다(위젯을 누를 때마다 0.1초로 바뀌면 안 된다).
-package_key = "|".join(sorted(document.document_id for document in parsed_documents))
+package_key = _package_fingerprint(
+    pdf_bytes_map,
+    elderly=package["elderly"],
+    nonface=package["nonface"],
+    with_llm=use_llm,
+    live_law=live_law,
+)
 first_elapsed = st.session_state.setdefault(
     f"elapsed::{package_key}", time.perf_counter() - started_at
 )
@@ -530,12 +991,17 @@ if selected_value:
         else:
             chosen_page = hit_pages[0]
         hit = next(h for h in hits if h["page"] == chosen_page)
-        image = render_highlighted_page(
-            pdf_bytes_map[selected_doc],
-            page_number=hit["page"],
-            rects=hit["rects"],
-        )
-        st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
+        # 업로드 원본이 JPG·PNG면 그대로 넘길 수 없다 — 변환된 PDF를 쓴다.
+        source = _renderable_pdf(selected_doc, pdf_details, pdf_bytes_map)
+        if source:
+            image = render_highlighted_page(
+                source,
+                page_number=hit["page"],
+                rects=hit["rects"],
+            )
+            st.image(image, caption=f"{selected_doc} · {hit['page']}페이지 · '{selected_value}' 근거 위치", use_container_width=True)
+        else:
+            st.caption("이 서류는 원문 페이지를 그려낼 수 없습니다(변환본 없음). 좌표만 아래에 보여줍니다.")
         with st.expander("좌표 데이터"):
             st.json(hits, expanded=False)
     else:
@@ -551,28 +1017,185 @@ st.caption(
     "컴플라이언스 기록물은 '언제·어떤 기준으로 판정했는가'가 핵심입니다. "
     "판정·근거 조문과 함께 검증 시각·사용 모델·적용 정책을 담아 내려받습니다."
 )
+all_legal_basis = [
+    item
+    for items in legal_basis_by_rule.values()
+    for item in items
+]
+
+# 실제 이번 검증에서 조회·판정 근거로 연결된 조문을 실행 결과에서 동적으로 만든다.
+# dict.fromkeys를 쓰면 규칙 실행 순서는 유지하면서 중복 조문만 제거할 수 있다.
+applied_legal_articles = list(dict.fromkeys(
+    item.get("citation")
+    for item in all_legal_basis
+    if item.get("citation")
+))
+
+# 통과가 아닌 항목에 연결된 조문은 사람이 다시 확인해야 할 법적 근거로 별도 기록한다.
+review_legal_articles = list(dict.fromkeys(
+    item.get("citation")
+    for check in checks
+    if check.status != CheckStatus.PASS
+    for item in legal_basis_by_rule.get(check.rule_id, [])
+    if item.get("citation")
+))
+
+legal_origins = sorted({item.get("origin", "") for item in all_legal_basis if item.get("origin")})
+live_law_succeeded = "law.go.kr" in legal_origins
+
+# Streamlit 재실행 때마다 바뀌지 않도록, 같은 파일·설정 조합의 최초 검증 시각을 보존한다.
+verified_at = st.session_state.setdefault(
+    f"verified_at::{package_key}",
+    datetime.now().astimezone().isoformat(timespec="seconds"),
+)
+exported_at = datetime.now().astimezone().isoformat(timespec="seconds")
+reasoning_model = (
+    (os.environ.get("ANTHROPIC_MODEL") or "claude-haiku-4-5")
+    if any(issue.used_llm for issue in issues.values())
+    else None
+)
+vision_model = (
+    (os.environ.get("VISION_MODEL") or "claude-haiku-4-5")
+    if any(pdf.vision_applied for pdf in pdf_details.values())
+    else None
+)
+extraction_models = sorted({
+    meta.model_used
+    for meta in extraction_meta.values()
+    if getattr(meta, "model_used", None)
+})
+
 report = {
-    "verified_at": datetime.now().isoformat(timespec="seconds"),
+    "schema_version": REPORT_SCHEMA_VERSION,
+    "verified_at": verified_at,
+    "exported_at": exported_at,
     "tool": "KB 금융상품 판매서류 검증 AI Copilot (MVP)",
-    "scope": "금융소비자보호법 제17조(적합성원칙)·제19조(설명의무) 관련 5개 항목",
+    "package": {
+        "package_id": package_key[:16],
+        "label": package["label"],
+        "slot": package["slot"] + 1,
+        "package_count_in_session": len(packages),
+        "export_scope": "selected_package_only",
+    },
+    "scope": {
+        "description": "금융상품 판매서류 교차 검증 MVP",
+        "rule_count": 8,
+        "rule_ids": [
+            "PKG-001", "FIT-001", "EXP-001", "DATE-001",
+            "ACK-001", "ADV-001", "DOC-001", "REC-001",
+        ],
+        # 이 목록은 현재 규칙 엔진이 지원하는 전체 법률 범위다.
+        # 실제 이번 판매 건에서 연결된 조문은 아래 legal_articles 섹터에 따로 기록한다.
+        "legal_articles": [
+            "금융소비자 보호에 관한 법률 제17조",
+            "금융소비자 보호에 관한 법률 제19조",
+            "금융소비자 보호에 관한 법률 제21조",
+            "금융소비자 보호에 관한 법률 제23조",
+            "금융소비자 보호에 관한 법률 제28조",
+        ],
+        "legal_articles_meaning": "supported_scope",
+        "excluded_scope": [
+            "제18조 적정성원칙",
+            "제20조 불공정영업행위",
+            "제22조 광고 관련 의무",
+        ],
+    },
+    "legal_articles": {
+        # 실제 법령 검색 결과에 존재하는 조문만 들어가므로 하드코딩 목록이 아니다.
+        "applied": applied_legal_articles,
+        # 위험·누락·주의 판정에 연결되어 담당자 재검토가 필요한 조문만 별도 표시한다.
+        "requiring_review": review_legal_articles,
+        # 어떤 규칙이 어떤 조문을 사용했는지 추적할 수 있도록 규칙별 연결도 남긴다.
+        "by_rule": [
+            {
+                "rule_id": check.rule_id,
+                "status": check.status.value,
+                "citations": [
+                    item.get("citation")
+                    for item in legal_basis_by_rule.get(check.rule_id, [])
+                    if item.get("citation")
+                ],
+            }
+            for check in checks
+        ],
+    },
     "settings": {
-        "llm_used": use_llm,
-        "extraction_model": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
-        "vision_model": os.environ.get("VISION_MODEL", "claude-haiku-4-5"),
-        "live_law_lookup": live_law,
+        "llm_requested": use_llm,
+        "live_law_lookup_requested": live_law,
         "profile_min_grade": dict(DEFAULT_PROFILE_MIN_ALLOWED_GRADE),
         "elderly_investor": package["elderly"],
+        "non_face_to_face": package["nonface"],
+    },
+    "execution": {
+        "llm_actually_used": any(meta.used_llm for meta in extraction_meta.values())
+        or any(issue.used_llm for issue in issues.values()),
+        "fallback_occurred": any(
+            getattr(meta, "fallback_occurred", False) for meta in extraction_meta.values()
+        ),
+        "extraction_models_used": extraction_models,
+        "reasoning_model_used": reasoning_model,
+        "vision_model_used": vision_model,
+        "law_lookup": {
+            "live_lookup_requested": live_law,
+            "live_lookup_succeeded": live_law_succeeded,
+            "fallback_to_local": bool(live_law and "local" in legal_origins),
+            "sources_used": legal_origins,
+        },
+    },
+    "versions": {
+        "report_schema": REPORT_SCHEMA_VERSION,
+        "rule_set": RULE_SET_VERSION,
+        "git_commit": os.environ.get("GITHUB_SHA") or os.environ.get("GIT_COMMIT"),
+        "law_corpus_sha256": _regulation_corpus_hash(),
+    },
+    "processing": {
+        "status": "partial" if errors else "complete",
+        "uploaded_document_count": package.get(
+            "uploaded_count", len(parsed_documents) + len(errors)
+        ),
+        "processed_document_count": len(parsed_documents),
+        "failed_document_count": len(errors),
+        "failures": errors,
     },
     "documents": [
         {
             "document_id": document.document_id,
+            "sha256": _sha256_bytes(pdf_bytes_map[document.document_id]),
+            "file_size_bytes": len(pdf_bytes_map[document.document_id]),
             "doc_type": document.doc_type,
+            "read_mode": (
+                "ai_vision" if pdf_details[document.document_id].vision_applied
+                else "ocr" if pdf_details[document.document_id].ocr_applied
+                else "text_layer"
+            ),
+            "extraction": {
+                "used_llm": extraction_meta[document.document_id].used_llm,
+                "model_used": getattr(
+                    extraction_meta[document.document_id], "model_used", None
+                ),
+                "models_attempted": list(
+                    getattr(
+                        extraction_meta[document.document_id],
+                        "models_attempted",
+                        (),
+                    )
+                ),
+                "fallback_occurred": getattr(
+                    extraction_meta[document.document_id],
+                    "fallback_occurred",
+                    False,
+                ),
+                "warning": extraction_meta[document.document_id].warning,
+            },
             "fields": [
                 {
                     "name": field.name,
                     "value": field.value,
                     "page": field.page,
-                    "source": FIELD_SOURCE_LABEL(field),
+                    "confidence": field.confidence,
+                    "evidence_text": field.evidence_text,
+                    "source_type": FIELD_SOURCE_TYPE(field),
+                    "source_label": FIELD_SOURCE_LABEL(field),
                 }
                 for field in document.fields
             ],
@@ -584,24 +1207,60 @@ report = {
             "rule_id": check.rule_id,
             "description": check.description,
             "status": check.status.value,
-            "document_excerpt": check.document_excerpt,
+            "document_evidence": {
+                "summary": check.document_excerpt,
+                # 각 근거는 문서·필드·페이지·원문과 PDF 좌표까지 함께 기록한다.
+                "items": [
+                    _evidence_payload(item, pdf_details)
+                    for item in check.evidence_items
+                ],
+                # 1.1 소비자와의 호환을 위해 기존 키도 유지한다.
+                "excerpt": check.document_excerpt,
+            },
+            "legal_basis": legal_basis_by_rule.get(check.rule_id, []),
+            "explanation": {
+                "rationale": issues[check.rule_id].rationale,
+                "generated_by_llm": issues[check.rule_id].used_llm,
+                "search_query": issues[check.rule_id].search_query,
+                # 하위 호환 필드는 규칙 엔진의 공식 조치로 고정한다 — 기록의 기준은
+                # 사람이 정한 규칙이어야 한다.
+                "recommended_action": (
+                    check.action_plan.required_action
+                    if check.action_plan else "추가 조치 없음"
+                ),
+                "recommended_action_generated_by_llm": False,
+                # 화면에 함께 뜨는 '이 건에서 확인할 것'(LLM이 서류 값에 맞춰 좁힌 문구).
+                # 공식 조치와 구분해 별도 키로 남긴다.
+                "case_specific_check": issues[check.rule_id].recommended_action,
+                "case_specific_check_generated_by_llm": issues[check.rule_id].used_llm,
+            },
+            "action_plan": (
+                check.action_plan.model_dump() if check.action_plan else None
+            ),
+            "rule_suggestion": check.suggestion,
+            # 기존 소비자와의 호환을 위해 대표 근거 필드는 유지한다.
             "evidence_clause": check.evidence_clause,
-            "suggestion": check.suggestion,
+            "evidence_text": check.evidence_text,
         }
         for check in checks
     ],
     "metrics": {
         "document_count": metrics.document_count,
+        "check_count": metrics.check_count,
         "blocker_count": metrics.blocker_count,
         "warning_count": metrics.warning_count,
         "elapsed_seconds": metrics.elapsed_seconds,
     },
+    # 기존 스키마 호환 필드. 새 소비자는 processing.failures를 사용한다.
     "unread_documents": errors,
 }
 st.download_button(
-    "검증 결과 JSON 내려받기",
+    f"{package['label']} 검증 결과 JSON 내려받기",
     data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
-    file_name=f"검증결과_{datetime.now():%Y%m%d_%H%M%S}.json",
+    file_name=(
+        f"검증결과_판매건{package['slot'] + 1}_"
+        f"{datetime.now():%Y%m%d_%H%M%S}.json"
+    ),
     mime="application/json",
 )
 

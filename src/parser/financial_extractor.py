@@ -33,8 +33,14 @@ DOC_TYPES = {
 # 유형에 없는 필드는 아예 담지 않고, 있는 필드는 값이 없어도 자리를 남긴다(미확인).
 # 상품설명서에 고객확인·계약일이 없는 것은 문서의 성격이지 추출 실패가 아니다.
 DOC_TYPE_FIELDS: dict[str, tuple[str, ...]] = {
+    # 적합성 진단표에는 설명일을 두지 않는다. 이 서류의 날짜는 '투자성향 기준일'
+    # (진단일)이지 상품 설명을 한 날이 아니다. 자리를 열어 두면 LLM이 그 날짜를
+    # 설명일로 볼지 말지 회차마다 갈리고, 그 값 하나로 DATE-001이 통과↔위험으로
+    # 뒤집힌다(실측: 실물 진단표 3회 판독 중 2회만 2026-07-24를 설명일로 냈고,
+    # 그 값이 들어가면 계약일보다 늦어 위반 판정이 됐다).
+    # 설명일은 설명확인서에서 받는다.
     "suitability_form": (
-        "customer_profile", "explanation_date", "customer_acknowledgement",
+        "customer_profile", "customer_acknowledgement",
         "staff_name", "principal_loss_explained", "risk_level_explained",
     ),
     "product_description": (
@@ -103,7 +109,14 @@ SEMANTIC_EXPLANATION_FIELDS = {
         "투자금액을 하회", "손실은 투자자에게 귀속",
     ],
     "risk_level_explained": ["위험등급", "위험 수준", "위험도"],
-    "fees_explained": ["수수료", "보수", "비용", "판매보수", "운용보수"],
+    # '비용'·'보수'는 두 글자짜리 일반어라 엉뚱한 문맥에도 걸린다. 실측 —
+    # "본 안내장 제작 비용은 당사가 부담합니다", "담당자: 김보수" 만으로
+    # 수수료 설명이 이행됐다고 판정했다(EXP-001 미탐, 금소법 19조).
+    # 실물 상품설명서는 수수료를 33회·보수를 28회 쓰는데 전부 복합어
+    # (판매수수료·판매보수·총보수)라 좁혀도 탐지에는 지장이 없다.
+    "fees_explained": [
+        "수수료", "판매보수", "운용보수", "수탁보수", "총보수", "보수율", "제비용",
+    ],
 }
 
 ALL_FIELD_NAMES = tuple(FIELD_PATTERNS) + tuple(SEMANTIC_EXPLANATION_FIELDS)
@@ -114,6 +127,9 @@ class ExtractionResult:
     doc_type: str
     fields: list[ParsedField]
     used_llm: bool
+    model_used: str | None = None
+    models_attempted: tuple[str, ...] = ()
+    fallback_occurred: bool = False
     warning: str | None = None
 
 
@@ -141,6 +157,13 @@ def _normalize_date(value: str) -> str:
         return f"{y:04d}-{m:02d}-{d:02d}"
     parts = re.split(r"[./-]", value)
     if len(parts) == 3 and all(part.isdigit() for part in parts):
+        # 두 자리 연도는 세기를 지어내지 않고 원문 그대로 둔다. 그래야 뒤에서
+        # 날짜로 읽히지 않아 '형식 확인' 경고가 뜬다.
+        # 예전에는 "26.07.15"를 서기 26년으로 만들어 버렸다 — 그러면 설명일이
+        # 계약일보다 2000년 앞서게 되어, 계약 이후 설명(DATE-001 위반)을
+        # 정상으로 통과시킨다(실측: 설명일 26.07.15 / 계약일 2026-07-12 → PASS).
+        if len(parts[0]) != 4:
+            return value
         y, m, d = map(int, parts)
         return f"{y:04d}-{m:02d}-{d:02d}"
     return value
@@ -287,8 +310,31 @@ def vision_scan_risk_grade(image_bytes: bytes) -> str | None:
     텍스트 레이어가 공란이다. 이 경로가 없으면 등급이 영영 안 잡힌다.
     """
     answer = _vision_ask(image_bytes, _VISION_GRADE_PROMPT, "vision-grade")
-    m = re.search(r"[1-6]", answer or "")
-    return f"{m.group(0)}등급" if m else None
+    return parse_vision_grade(answer)
+
+
+# 비전 답변에서 위험등급을 읽을 때는 '답변이 등급 하나'일 때만 인정한다.
+_VISION_GRADE_ANSWER = re.compile(r"\s*([1-6])\s*(?:등급)?\s*")
+
+
+def parse_vision_grade(answer: object) -> str | None:
+    """비전이 답한 위험등급. 등급을 단독으로 답했을 때만 채택한다.
+
+    예전에는 답변 어디서든 첫 1~6 숫자를 집었다. 그래서 등급을 못 찾았다는
+    답이 등급으로 둔갑했다(실측):
+        "표시 없음(1~6 중 판단 불가)"  → 1등급
+        "6개 항목 중 표시 없음"        → 6등급
+    1등급은 거의 모든 투자성향에서 FIT-001 위험을 만들고, 6등급은 반대로
+    전부 통과시킨다 — 어느 쪽이든 판정이 뒤집힌다. 위험등급은 이 도구의
+    대표 규칙을 좌우하는 값이라 애매하면 채택하지 않는 편이 옳다.
+    """
+    if answer is None or isinstance(answer, bool):
+        return None
+    if isinstance(answer, (int, float)):
+        number = int(answer)
+        return f"{number}등급" if 1 <= number <= 6 else None
+    match = _VISION_GRADE_ANSWER.fullmatch(str(answer))
+    return f"{match.group(1)}등급" if match else None
 
 
 _VISION_SIGNATURE_PROMPT = (
@@ -301,14 +347,27 @@ _VISION_SIGNATURE_PROMPT = (
 SIGNED = "확인(서명 기재)"
 UNSIGNED = "미서명"
 # 서류가 스스로 '확인받지 못했다'고 적어둔 표현. ACK-001의 부정 판정어와 같은 집합.
-_UNSIGNED_TOKENS = ("미확인", "없음", "미서명", "아니오")
+_UNSIGNED_TOKENS = ("미확인", "미서명", "미기재", "아니오", "공란", "빈칸")
+# '없음'은 무엇이 없는지까지 봐야 한다. 그냥 부분 문자열로 찾으면 '특이사항 없음',
+# '이의 없음 확인 서명'처럼 정상 서명 문구를 미서명으로 판정한다(실측: 오탐 3건).
+# 컴플라이언스 도구에서 오탐은 미탐만큼 나쁘다 — 정상 건이 빨간불이면 안 쓰게 된다.
+_UNSIGNED_PHRASES = ("서명없음", "확인없음", "기재없음", "날인없음", "서명란없음")
 
 
-def _states_unsigned(value: str) -> bool:
+def states_unsigned(value: str) -> bool:
+    """서류가 스스로 '확인받지 못했다'고 적은 표현인지.
+
+    추출(정규화)과 판정(ACK-001·DOC-001)이 같은 기준을 써야 한다.
+    한쪽만 고치면 같은 서류에 모순된 판정이 나온다(실측).
+    """
     compact = value.replace(" ", "")
     if compact.lower() in ("false", "no"):  # LLM이 불리언으로 내는 경우
         return True
-    return any(token in compact for token in _UNSIGNED_TOKENS)
+    if compact in ("없음", "무", "-"):  # 값 자체가 '없음'이면 서명이 없다는 뜻
+        return True
+    if any(token in compact for token in _UNSIGNED_TOKENS):
+        return True
+    return any(phrase in compact for phrase in _UNSIGNED_PHRASES)
 
 
 def vision_scan_signature(image_bytes: bytes) -> str | None:
@@ -381,7 +440,7 @@ def normalize_field(name: str, value: str | None) -> str | None:
         # 서류가 '확인받지 못했다'고 적은 표현은 표기가 제각각이다(미서명 / False / 없음).
         # ACK-001은 부정 표현을 보고 위험을 내므로, 여기서 표준 문구로 모아준다.
         # (실측: LLM이 '미서명'을 'False'로 내보내 규칙이 부정으로 못 읽고 통과시켰다)
-        return UNSIGNED if _states_unsigned(value) else _compact(value)
+        return UNSIGNED if states_unsigned(value) else _compact(value)
     if name in {"explanation_date", "contract_date"}:
         return _normalize_date(value)
     if name in SEMANTIC_EXPLANATION_FIELDS:
@@ -405,15 +464,63 @@ def classify_document_rule_based(text: str) -> str:
     return best_type if scores.get(best_type, 0) > 0 else "unknown"
 
 
+# 서류의 정체는 본문 어휘 빈도가 아니라 '제목'에 있다.
+#
+# 왜: 본문 키워드 수로 가르면 ELS·DLS 상품설명서가 뒤집힌다. 그 서류들은
+# 청약 절차를 길게 설명해서 '청약·신청금액·가입일'이 상품설명서 어휘보다
+# 많이 나온다(실측 — 대우 DLS611·미래에셋 ELS4716·신한 ELS핵심설명서 3건이
+# 모두 본문 최고점 application). 반면 제목은 <간이투자설명서>로 명확하다.
+#
+# 낱말은 '제목에만 나오는 말'이어야 한다. 공백을 지우고 맞추기 때문에
+# '고객 확인 서명'이 '고객확인서'가 되어 설명확인서로 둔갑한다(테스트가 잡아냈다).
+# 같은 이유로 '확인서'·'신청서'·'설명서'는 제외한다.
+_TITLE_ZONE_CHARS = 300
+_TITLE_WORDS: dict[str, tuple[str, ...]] = {
+    "acknowledgement": ("상품설명확인서", "설명의무이행확인", "설명확인서"),
+    "suitability_form": ("투자자정보확인서", "투자자정보분석", "적합성진단표", "적합성확인서",
+                         "투자성향진단", "투자성향분석"),
+    "application": ("가입청약서", "가입신청서", "청약서"),
+    "product_description": ("핵심상품설명서", "간이투자설명서", "핵심설명서", "투자설명서",
+                            "상품설명서"),
+}
+# 같은 자리에서 여러 낱말이 걸리면 '더 긴 낱말'이 이긴다.
+# '적합성확인서'는 '확인서'를 품고 있어서, 유형 순서로 가르면 설명확인서로 뒤집힌다.
+_TITLE_ORDER = ("acknowledgement", "suitability_form", "application", "product_description")
+
+
+def title_doc_type(text: str, zone_chars: int = _TITLE_ZONE_CHARS) -> str | None:
+    """서류 앞머리(제목 영역)에서 문서유형을 읽는다. 못 읽으면 None."""
+    zone = _compact_for_match(text[:zone_chars])
+    if not zone:
+        return None
+    best: tuple[int, int, str] | None = None   # (낱말 길이, 유형 우선순위 역순, 유형)
+    for rank, doc_type in enumerate(_TITLE_ORDER):
+        for word in _TITLE_WORDS[doc_type]:
+            needle = _compact_for_match(word)
+            if needle and needle in zone:
+                candidate = (len(needle), -rank, doc_type)
+                if best is None or candidate > best:
+                    best = candidate
+    return best[2] if best else None
+
+
 def confident_rule_doc_type(text: str) -> str | None:
     """규칙 분류가 '이견 없이' 하나를 가리킬 때만 그 유형을 반환한다.
 
     doc_type은 모든 필드 게이팅의 기준이라 판정 임계값이다. 실측 — 제목이
     '상품설명 확인서'인 설명확인서를 LLM이 상품설명서로 오분류했고, 그 결과
     고객확인·담당자 필드가 스키마에서 통째로 버려져 ACK-001이 위험에서
-    누락으로 약해졌다. 반면 규칙 분류는 키워드 4개로 정확히 맞혔다.
-    다른 유형 점수가 0이고 자기 점수가 2 이상일 때만 '확신'으로 본다.
+    누락으로 약해졌다.
+
+    1순위는 제목이다. 예전에는 '다른 유형 점수가 전부 0'일 때만 확신으로 봤는데,
+    그 조건이 너무 빡빡해 정작 이 함수를 만든 계기였던 설명확인서에서도 발동하지
+    않았다(실측 — acknowledgement 9점인데 product_description 4점이 있어 침묵했고,
+    LLM의 오답 product_description이 그대로 남았다).
     """
+    by_title = title_doc_type(text)
+    if by_title:
+        return by_title
+    # 제목을 못 읽은 서류는 예전 기준을 그대로 쓴다 — 애매하면 침묵하고 LLM에 맡긴다.
     scores = classify_scores(text)
     best_type = max(scores, key=lambda k: scores[k], default="unknown")
     best_score = scores.get(best_type, 0)
@@ -437,6 +544,9 @@ def _field(name: str, value: str | None, evidence: str | None, confidence: float
         value=normalize_field(name, value),
         page=_page_from_locator(locator, evidence),
         confidence=confidence if value is not None else 0.0,
+        # LLM/규칙이 사용한 실제 원문을 보존한다. 값만 남기면 같은 단어가 여러 번
+        # 등장할 때 어느 위치가 판정 근거인지 구분할 수 없다.
+        evidence_text=evidence,
     )
 
 
@@ -612,7 +722,13 @@ def _attempt_llm(
     if confident and confident != doc_type:
         doc_type = confident
 
-    result = ExtractionResult(doc_type=doc_type, fields=fields, used_llm=True)
+    result = ExtractionResult(
+        doc_type=doc_type,
+        fields=fields,
+        used_llm=True,
+        model_used=model,
+        models_attempted=(model,),
+    )
     _apply_doc_type_gating(result, parsed)
     return result
 
@@ -672,6 +788,7 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         result = extract_rule_based(parsed, locator=locator)
+        result.fallback_occurred = True
         result.warning = "ANTHROPIC_API_KEY가 없어 규칙 기반 추출을 사용했습니다."
         return result
 
@@ -685,6 +802,7 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
             last_error = exc
             continue
         best = result
+        result.models_attempted = tuple(ladder[: i + 1])
         # 마지막 티어이거나 결과가 충분하면 종료. 약하면 다음(상위) 모델로 승격.
         if i == len(ladder) - 1 or not _is_weak(result):
             if i > 0:
@@ -695,6 +813,8 @@ def extract_with_llm(parsed: ParsedDocument, locator: Locator | None = None) -> 
         return best
     # 모든 티어 실패 → 규칙 기반 폴백
     result = extract_rule_based(parsed, locator=locator)
+    result.models_attempted = tuple(ladder)
+    result.fallback_occurred = True
     result.warning = (
         f"LLM 추출 실패로 규칙 기반 폴백 사용: {type(last_error).__name__}"
         if last_error
@@ -714,7 +834,9 @@ def apply_doc_type_schema(result: ExtractionResult) -> None:
         return
     by_name = {field.name: field for field in result.fields}
     result.fields = [
-        by_name.get(name) or ParsedField(name=name, value=None, page=None, confidence=0.0)
+        by_name.get(name) or ParsedField(
+            name=name, value=None, page=None, confidence=0.0, evidence_text=None
+        )
         for name in expected
     ]
 
@@ -861,10 +983,11 @@ def _fill_from_vision(
         payload = vision_read_page(image, tuple(wanted))
 
         if "risk_grade" in wanted:
-            m = re.search(r"[1-6]", str(payload.get("risk_grade") or ""))
-            if m:
+            grade = parse_vision_grade(payload.get("risk_grade"))
+            if grade:
                 field = by_name["product_risk_level"]
-                field.value, field.confidence, field.page = f"{m.group(0)}등급", 0.85, page_number
+                field.value, field.confidence, field.page = grade, 0.85, page_number
+                field.evidence_text = f"AI 비전 판독: {grade}"
                 wanted.remove("risk_grade")
 
         if "contract_date" in wanted:
@@ -872,6 +995,7 @@ def _fill_from_vision(
             if value:
                 field = by_name["contract_date"]
                 field.value, field.confidence, field.page = value, 0.85, page_number
+                field.evidence_text = f"AI 비전 판독: {value}"
                 wanted.remove("contract_date")
 
         if "signature" in wanted:
@@ -888,7 +1012,8 @@ def _fill_from_vision(
         field = by_name["customer_acknowledgement"]
         if signature_verdict is not None:
             field.value, field.confidence = signature_verdict, 0.85
-        elif field.value and not _states_unsigned(field.value):
+            field.evidence_text = f"AI 비전 판독: {signature_verdict}"
+        elif field.value and not states_unsigned(field.value):
             # 서명란을 찾지 못했는데 텍스트만 보고 '확인'을 낸 값은 근거가 없다.
             # 다만 '미서명'처럼 서류가 명시적으로 부정을 적어둔 경우는 그 자체가
             # 증거이므로 지우지 않는다(지우면 위험이 누락으로 약해진다).

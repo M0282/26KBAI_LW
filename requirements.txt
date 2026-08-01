@@ -1,13 +1,16 @@
 # Python 3.10 이상 필요 (개발·검증은 3.12 기준).
 # 3.9는 2025-10 지원 종료(EOL)라 대상에서 제외한다.
-anthropic
-streamlit
-pydantic>=2
-python-dotenv
-PyMuPDF
-requests
-rank_bm25
-chromadb
+#
+# 하한은 실제로 검증한 버전이다. 상한을 다음 메이저 앞까지로 막아 둔 이유는
+# 심사 시점에 나온 새 메이저 버전이 설치를 깨뜨리지 않게 하기 위해서다.
+anthropic>=0.120,<1
+streamlit>=1.60,<2
+pydantic>=2.13,<3
+python-dotenv>=1.2,<2
+PyMuPDF>=1.28,<2
+requests>=2.32,<3
+rank_bm25>=0.2.2,<1
 
+# 개발용 — 앱 실행에는 필요하지 않다.
 pytest>=8
 python-pptx>=1.0,<2

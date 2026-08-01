@@ -9,8 +9,10 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from src.common.schemas import CheckStatus, ParsedDocument, RuleCheck
-from src.parser.financial_extractor import field_map, parse_iso_date
+from src.common.schemas import (
+    CheckStatus, EvidenceRef, ParsedDocument, ParsedField, RemediationAction, RuleCheck,
+)
+from src.parser.financial_extractor import field_map, parse_iso_date, states_unsigned
 
 
 @dataclass(frozen=True)
@@ -18,44 +20,141 @@ class RuleLawHint:
     query: str
     preferred_articles: tuple[str, ...] = ()
     preferred_sources: tuple[str, ...] = ()
+    # 조문 안에서 이 규칙이 실제로 걸리는 문구. 조문 전체를 보여주면
+    # "그래서 어디가 문제냐"에 답하지 못한다 — 금소법 19조는 1,685자이고
+    # 설명 확인 의무(②항)는 그중 한 문장이다.
+    # 값은 조문 원문에 실제로 있는 표현이어야 한다(대조해 넣었다).
+    # 주의: 법령은 낱말 사이에 괄호 정의문을 끼워 넣는다 —
+    #   '위험등급(이하 "위험등급"이라 한다)에 관한 정보와 비교하여 평가할 것'
+    # 그래서 눈으로 읽은 대로 적으면 매칭되지 않는다. 괄호를 건너뛴 조각으로 쓴다.
+    # tests 가 모든 문구의 코퍼스 존재를 검사하므로 오타·개정은 그때 드러난다.
+    focus: tuple[str, ...] = ()
+    # 근거 조문을 (법령, 조문번호) 쌍으로 확정 선언한다. 선언 순서가 표시 순서다.
+    #
+    # 예전에는 검색어로 근거를 찾았다. 그런데 앱은 LLM이 만든 검색어를 쓰기 때문에
+    # 같은 판정인데 근거가 흔들렸다(실측: 8종 중 5종. '확정수익 표현 검사' 질의에서
+    # 부당권유 판정의 최우선 근거가 제21조가 아니라 제19조로 바뀌었고, 설명의무
+    # 판정에서는 감독규정 제12·13조가 질의에 따라 나오거나 빠졌다).
+    #
+    # 어느 조문이 근거인지는 우리가 이미 안다. 검색어에 맡길 이유가 없다.
+    basis: tuple[tuple[str, str], ...] = ()
+    # 어느 조문을 근거로 올릴지 판정할 때 쓰는 문구. basis 가 있으면 쓰이지 않는다.
+    #
+    # 강조용 문구는 넓어야 좋다 — 담당자가 조문에서 볼 곳을 많이 짚어 주니까.
+    # 그런데 그 넓은 문구로 조문을 고르면 엉뚱한 조문이 올라온다. '서명·기명날인·
+    # 녹취'는 금소법 여러 조문에 나오는 절차 표현이라, 설명 확인(ACK-001) 판정에
+    # 감독규정 제14조(불공정영업행위의 금지)가 근거로 떴다(실측).
+    # 그래서 '무엇을 강조할지'와 '어느 조문을 고를지'를 분리한다.
+    anchor: tuple[str, ...] = ()
+
+    @property
+    def grounding(self) -> tuple[str, ...]:
+        """근거 조문 선택에 쓸 문구."""
+        return self.anchor or self.focus
 
 
 LAW_HINTS: dict[str, RuleLawHint] = {
     "PKG-001": RuleLawHint(
         "금융상품 판매 서류 상품 동일성 설명 확인",
         # 조문 힌트가 없으면 BM25가 정의·유형 조문(제2·3·4조)을 상위로 올려 근거가 겉돈다.
-        preferred_articles=("19",),
+        # 서류가 같은 상품을 가리켜야 한다는 요구의 근거는 설명 대상 특정(19조)과
+        # 계약서류 제공(23조) 둘이다.
+        preferred_articles=("19", "23"),
         preferred_sources=("금융소비자 보호에 관한 법률",),
+        # '중요한 사항'은 조문 여러 목에 흩어져 있어 강조가 번진다. 상품 동일성의
+        # 근거는 '무엇에 대해 설명해야 하는가'를 규정한 의무 문장이다.
+        # 뒤 문구는 금소법 제23조(계약서류의 제공의무) — 서류가 같은 상품에 대한
+        # 것이어야 한다는 요구의 근거라서 함께 보여준다.
+        focus=("이해할 수 있도록 설명", "계약서류를 금융소비자에게 지체 없이 제공"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "19"),
+            ("금융소비자 보호에 관한 법률", "23"),
+        ),
     ),
     "FIT-001": RuleLawHint(
         "일반금융소비자 투자성향 고위험 금융상품 적합성 원칙",
         preferred_articles=("17",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        # '면담ㆍ질문'은 제18조(적정성원칙)에도 나온다 — 권유 없이 판매할 때의
+        # 다른 원칙이라 적합성 판정의 근거로 올리면 혼동을 준다(실측). 그래서 뺐다.
+        # 뒤 두 줄은 감독규정 제10조(적합성 원칙)의 표현 — 손실 감수능력 평가
+        # 기준을 정한 조문이라 적합성 판정의 실질 근거다.
+        focus=("적합하지 아니하다고 인정되는", "권유해서는 아니 된다",
+            "손실에 대한 감수능력", "관한 정보와 비교하여 평가"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "17"),
+            ("금융소비자 보호에 관한 감독규정", "10"),
+        ),
     ),
     "EXP-001": RuleLawHint(
         "금융상품 중요사항 설명의무 원금손실 수수료 위험",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        # '중요한 사항'·'수수료'는 보장성·예금성·대출성 목에도 나와서 이 도구가
+        # 다루지 않는 상품의 설명 항목까지 강조된다(실측: 보장성 상품 목이 섞였다).
+        # 투자성 상품 목(나.)에만 있는 표현으로 좁힌다.
+        # 마지막 줄은 감독규정 제12조(설명의무)의 표현이다 — 위험등급을 어떻게
+        # 정해야 하는지 규정한 조문이라 설명의무 판정의 실질 근거다.
+        focus=("이해할 수 있도록 설명", "투자성 상품의 내용", "투자에 따른 위험",
+            "정하는 위험등급", "부담해야 하는 수수료",
+            "위험등급을 정하는 경우", "비례하여 구분할 것",
+            # 감독규정 제13조(설명서) — 설명서를 어떻게 작성해야 하는지 정한 조문.
+            "알기 쉬운 용어"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "19"),
+            ("금융소비자 보호에 관한 감독규정", "12"),
+            ("금융소비자 보호에 관한 감독규정", "13"),
+        ),
     ),
     "DATE-001": RuleLawHint(
         "금융상품 계약 체결 전 설명의무 설명 시점",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률",),
+        focus=("계약 체결을 권유", "설명을 요청하는 경우", "설명하여야 한다"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "19"),
+        ),
     ),
     "ACK-001": RuleLawHint(
         "금융상품 설명 확인 증빙 서명 교부",
         preferred_articles=("19",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("이해하였음을", "서명", "기명날인", "녹취", "확인을 받아",
+            "설명서를 일반금융소비자에게 제공"),
+        # 19조 ②항에만 있는 표현으로 조문을 고른다.
+        anchor=("이해하였음을", "설명서를 일반금융소비자에게 제공"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "19"),
+        ),
     ),
     "ADV-001": RuleLawHint(
         "투자성 상품 부당권유 금지 단정적 판단 원금보장 표현",
-        preferred_articles=("21",),
+        # 19조 ③항(거짓·왜곡 설명 금지)도 부당권유의 근거다 — 같은 행위를
+        # 설명의무 쪽에서 규정한 조문이라 함께 보여준다.
+        preferred_articles=("21", "19"),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        focus=("불확실한 사항", "단정적 판단", "확실하다고 오인"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "21"),
+            ("금융소비자 보호에 관한 법률", "19"),
+        ),
     ),
     "DOC-001": RuleLawHint(
         "금융상품 판매 계약서류 제공의무 기록 유지 관리",
         preferred_articles=("23",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        # 마지막 줄은 감독규정 제21조(계약서류의 제공의무)의 표현이다 — 비대면
+        # 전자 교부 방법을 정한 조문이라 이 규칙과 직접 맞물린다.
+        focus=("계약서류를 금융소비자에게 지체 없이 제공", "증명하여야 한다",
+            "계약서류를 전자우편",
+            "자료를 기록"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "23"),
+            ("금융소비자 보호에 관한 감독규정", "21"),
+            # 서류를 구비해야 하는 이유는 제공의무(23조)와 기록 유지 의무(28조)
+            # 둘이다. 담당자가 "왜 이 서류가 있어야 하나"에 답할 근거가 된다.
+            ("금융소비자 보호에 관한 법률", "28"),
+        ),
     ),
     "REC-001": RuleLawHint(
         # 녹취 의무의 직접 근거는 자본시장법 시행령·금융투자업규정이라 현재 코퍼스에 없다.
@@ -63,8 +162,108 @@ LAW_HINTS: dict[str, RuleLawHint] = {
         "금융상품 판매 과정 자료의 기록 유지 관리 고령투자자 보호",
         preferred_articles=("28",),
         preferred_sources=("금융소비자 보호에 관한 법률", "금융소비자 보호에 관한 감독규정"),
+        # '유지ㆍ관리'는 28조 8개 항 중 4개에 나와서 강조의 초점이 흐려진다(실측).
+        # 기록 의무(①)와 훼손 방지(②)만 남긴다.
+        # 마지막 줄은 감독규정 제25조(자료의 기록 및 유지ㆍ관리)의 표현이다 —
+        # 보관 기간을 정한 조문이라 녹취 기록 보관 확인의 근거가 된다.
+        focus=("자료를 기록", "멸실 또는 위조", "고시하는 기간"),
+        basis=(
+            ("금융소비자 보호에 관한 법률", "28"),
+            ("금융소비자 보호에 관한 감독규정", "25"),
+        ),
     ),
 }
+
+# 조문은 항(①②③…) 단위로 나뉜다. 규칙이 걸리는 항만 골라 보여주기 위해 쓴다.
+_LAW_PARAGRAPH = re.compile(r"([①-⑮])")
+
+
+def split_law_paragraphs(text: str) -> list[str]:
+    """조문을 항 단위로 나눈다. 항 기호가 없으면 전체를 한 덩이로 본다."""
+    parts = _LAW_PARAGRAPH.split(text or "")
+    if len(parts) <= 1:
+        stripped = (text or "").strip()
+        return [stripped] if stripped else []
+    paragraphs = []
+    head = parts[0].strip()
+    if head:
+        paragraphs.append(head)
+    for marker, body in zip(parts[1::2], parts[2::2]):
+        joined = (marker + body).strip()
+        if joined:
+            paragraphs.append(joined)
+    return paragraphs
+
+
+def focus_pattern(focus: Iterable[str]) -> re.Pattern[str] | None:
+    """강조할 문구를 찾는 정규식. 글자 사이 공백·줄바꿈을 허용한다.
+
+    조문 원문은 줄바꿈이 낱말 한가운데를 자르는 경우가 있어(PDF·API 모두)
+    문구를 그대로 찾으면 놓친다.
+    """
+    alternatives = [
+        r"\s*".join(re.escape(ch) for ch in phrase if not ch.isspace())
+        for phrase in focus
+        if phrase and phrase.strip()
+    ]
+    return re.compile("|".join(alternatives)) if alternatives else None
+
+
+# 항 아래 단위: 호(1.) → 목(가.) → 세목(1)).
+_LAW_ITEM = re.compile(r"(?:(?<=\s)|(?<=^))(?:\d{1,2}\.|[가-하]\.|\d{1,2}\))\s")
+# 항이 이보다 짧으면 더 쪼개지 않는다. 문맥이 끊기는 손해가 더 크다.
+_NARROW_THRESHOLD = 400
+
+
+def narrow_to_items(paragraph: str, pattern: re.Pattern[str] | None) -> str:
+    """긴 항을 호·목 단위로 좁힌다. 의무를 규정한 머리 문장은 남긴다.
+
+    금소법 19조 ①항은 1,300자가 넘는다 — 보장성·투자성·예금성·대출성 상품의
+    설명 항목을 모두 나열하기 때문이다. 이 도구는 투자성 상품만 다루는데
+    보험료·대출금리까지 강조해 보여주면 '어디가 문제냐'에 다시 답하지 못한다.
+
+    머리 문장("…설명하여야 한다")은 의무의 근거라 항상 남기고, 그 아래 나열
+    항목은 규칙과 연결되는 것만 남긴다.
+    """
+    if pattern is None or len(paragraph) <= _NARROW_THRESHOLD:
+        return paragraph
+
+    marks = list(_LAW_ITEM.finditer(paragraph))
+    if not marks:
+        return paragraph
+
+    head = paragraph[: marks[0].start()].strip()
+    items = []
+    for index, mark in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(paragraph)
+        items.append(paragraph[mark.start():end].strip())
+
+    kept = [item for item in items if pattern.search(item)]
+    if head and pattern.search(head) and not kept:
+        # 의무 문장에만 걸리는 규칙이 있다(설명 시점·적합성 판단). 이때 나열
+        # 항목까지 붙이면 다시 벽이 된다 — 머리 문장만으로 근거가 충분하다.
+        return head
+    if not kept:
+        return paragraph
+    return "\n".join([head, *kept]) if head else "\n".join(kept)
+
+
+def focused_law_paragraphs(text: str, focus: Iterable[str]) -> list[str]:
+    """조문에서 이 규칙이 걸리는 항만 돌려준다.
+
+    금소법 19조는 1,685자인데 설명 확인 의무는 ②항 한 문장이다. 전체를 던지면
+    담당자가 어디를 봐야 하는지 알 수 없고, 앞부분만 잘라 보여주면 정작 그
+    문장이 화면에 나오지 않는다(실측: 화면이 700자에서 잘려 ②항이 안 보였다).
+    """
+    pattern = focus_pattern(focus)
+    if not pattern:
+        return []
+    return [
+        narrow_to_items(p, pattern)
+        for p in split_law_paragraphs(text)
+        if pattern.search(p)
+    ]
+
 
 # 금소법 21조: 투자성 상품에 '손실이 없다'는 단정적 판단을 제공하는 것은 금지된다.
 # 다만 실물 서류에는 같은 낱말이 정반대 맥락으로 흔하게 등장한다(실측):
@@ -81,11 +280,27 @@ _GUARANTEE_CLAIMS = (
     r"반드시수익",
 )
 # 뒤에 이런 표현이 붙으면 위반이 아니다(부정 고지 또는 상품 유형명).
-# '여'는 사실상 언제나 '여부'(원금보장 여부)다 — 중립적 질의 표현이지 보장 약속이 아니다.
-# 머리글이 낱말 사이에 끼어 '여부'가 쪼개지는 실물 사례가 있어 '여'만으로도 인정한다.
 _CLAIM_EXCEPTIONS = (
-    "되지", "되지않", "않", "아닙", "아니", "없는", "불가", "추구", "형", "여", "제외",
+    "되지", "되지않", "않", "아닙", "아니", "없는", "불가", "추구", "형", "제외",
 )
+# '원금보장 여부'는 중립적 질의 표현이지 보장 약속이 아니다. 그런데 실물 서류에서는
+# 이 낱말이 통째로 쪼개진다 — 신한 ELS 핵심설명서 실측:
+#
+#     …발행조건에 따른 원금보장여
+#     - 168 -
+#     투자자
+#     유의사항
+#     부와 관계없이 시장상황에 따라 원금손실이 발생할 수 있습니다.
+#
+# 쪽번호는 _PAGE_ARTIFACT 가 지우지만 여백 라벨('투자자 유의사항')은 남아서
+# '여'와 '부' 사이에 끼어든다. 그래서 '여부'를 붙어 있는 낱말로만 찾으면
+# 이 정상 위험고지가 부당권유로 잡힌다(오탐).
+#
+# 반대로 '여' 한 글자만으로 예외 처리하면 '하여·위하여·관하여'를 전부 삼켜
+# "수익을 보장하여 드립니다" 같은 명백한 위반을 놓친다(미탐).
+#
+# 그래서 '여 … 부'를 짧은 거리 안에서 함께 볼 때만 여부로 인정한다.
+_CLAIM_YEOBU = re.compile(r"여.{0,10}?부")
 _EXCEPTION_WINDOW = 12  # 표현 직후 이 글자 수 안에 예외어가 있으면 정상으로 본다
 
 
@@ -102,6 +317,8 @@ def find_guarantee_claims(text: str) -> list[str]:
             tail = compact[match.end() : match.end() + _EXCEPTION_WINDOW]
             if any(token in tail for token in _CLAIM_EXCEPTIONS):
                 continue  # "원금보장되지 않습니다" / "원금보장추구형" → 정상
+            if _CLAIM_YEOBU.search(tail):
+                continue  # "원금보장 여부" (여백 라벨이 낱말을 쪼갠 경우 포함) → 정상
             start = max(0, match.start() - 20)
             found.append(compact[start : match.end() + 20])
     return found
@@ -365,11 +582,10 @@ _ACK_SUBSTITUTE_PHRASES = (
 )
 
 
-def _is_negative_ack(value: str) -> bool:
-    """서류가 '확인받지 못했다'고 적은 표현인지(미서명 / 없음 / 미확인 …)."""
-    return any(
-        token in value.replace(" ", "") for token in ("미확인", "없음", "미서명", "아니오")
-    )
+# 부정 증빙 판정은 추출 모듈의 states_unsigned 하나로 통일한다.
+# 예전에는 여기에 같은 개념을 따로 구현해 뒀는데, 한쪽만 고치자 "이의 없음 확인
+# 서명"에 대해 ACK-001은 위험, DOC-001은 누락을 내는 모순이 실제로 재현됐다.
+_is_negative_ack = states_unsigned
 
 
 def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
@@ -384,8 +600,19 @@ def has_embedded_acknowledgement(documents: list[ParsedDocument]) -> bool:
     )
 
 
-def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
-    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조)."""
+def check_document_set(
+    documents: list[ParsedDocument], non_face_to_face: bool = False
+) -> RuleCheck:
+    """판매서류 4종 구비 여부 — 기록 유지·관리와 교차검증의 전제(금소법 23조).
+
+    non_face_to_face: 비대면(모바일·인터넷) 가입 여부. 비대면에서는 설명확인서가
+        별도 파일로 존재하지 않고 계약서의 확인 문구 + 전자서명이 그 역할을 한다.
+        판매 채널은 서류에서 읽히지 않으므로 검토자가 표시한다(고령 여부와 같다).
+
+        예전에는 이 인자가 없어서, 서류에 확인 문구만 있으면 채널과 무관하게
+        '주의'로 낮췄다. 그러면 영업점에서 설명확인서를 실제로 빠뜨린 건도
+        계약서에 인쇄된 문구 때문에 누락으로 드러나지 않는다.
+    """
     present = {d.doc_type for d in documents}
     missing = [t for t in REQUIRED_DOC_TYPES if t not in present]
     if not missing:
@@ -397,7 +624,13 @@ def check_document_set(documents: list[ParsedDocument]) -> RuleCheck:
         )
     # 설명확인서만 없고 그 내용이 다른 서류에 통합돼 있으면 비대면 판매의 정상 형태다.
     # 서류 자체는 계속 요구하되(회사는 전자문서로 보유해야 한다) 위반이 아닌 확인 사항으로 낮춘다.
-    if missing == ["acknowledgement"] and has_embedded_acknowledgement(documents):
+    # 대면 판매로 표시된 건에는 이 완화를 적용하지 않는다 — 영업점에서 설명확인서를
+    # 받지 않았다면 그건 통합 양식이 아니라 진짜 누락이다.
+    if (
+        non_face_to_face
+        and missing == ["acknowledgement"]
+        and has_embedded_acknowledgement(documents)
+    ):
         return RuleCheck(
             rule_id="DOC-001",
             description="판매서류 4종 구비 여부",
@@ -423,7 +656,9 @@ RECORDING_RISK_GRADES = (1, 2)
 
 
 def check_recording_requirement(
-    documents: list[ParsedDocument], elderly_investor: bool = False
+    documents: list[ParsedDocument],
+    elderly_investor: bool = False,
+    profile_min_grade: dict[str, int] | None = None,
 ) -> RuleCheck:
     """녹취 의무 대상 여부를 표시한다.
 
@@ -433,11 +668,17 @@ def check_recording_requirement(
 
     elderly_investor: 만 65세 이상 여부. 우리는 개인정보(생년월일)를 추출하지 않으므로
         화면에서 검토자가 입력한다.
+    profile_min_grade: 적합성 정책표. FIT-001과 **같은 표**를 써야 한다. 예전에는
+        인자를 받지 않아 늘 기본표로 재계산했고, 은행이 정책을 완화하면
+        FIT-001은 '적합'인데 REC-001은 '투자성향 부적합 판매'를 이유로 드는
+        모순이 생겼다(실측: 안정형 고객·5등급 상품, 안정형 최소등급을 4로 완화).
     """
     risks = _documents_with(documents, "product_risk_level")
     grades = [g for _, value in risks if (g := _risk_number(value)) is not None]
     high_risk = [g for g in grades if g in RECORDING_RISK_GRADES]
-    unsuitable = check_suitability(documents).status is CheckStatus.RISK
+    unsuitable = check_suitability(
+        documents, profile_min_grade=profile_min_grade
+    ).status is CheckStatus.RISK
 
     reasons: list[str] = []
     if high_risk:
@@ -538,7 +779,18 @@ def check_dates(documents: list[ParsedDocument]) -> RuleCheck:
     )
 
 
-def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
+def check_acknowledgement(
+    documents: list[ParsedDocument], non_face_to_face: bool = False
+) -> RuleCheck:
+    """고객 설명 확인 증빙 — 담당자 기재 여부는 판매 채널에 따라 다르게 본다.
+
+    non_face_to_face: 비대면(모바일·인터넷) 가입 여부.
+        대면 판매에서 설명 담당자가 서류에 없으면 사후에 '누가 설명했는지'를
+        입증할 수 없다. 책임 소재가 비는 것이므로 주의로 남긴다.
+        비대면은 사람 담당자 없이 전자적으로 진행되는 것이 정상이라,
+        담당자가 없다는 이유만으로 주의를 매기면 정상 판매를 오탐한다
+        (실측: 비대면으로 표시해도 담당자 부재만으로 주의가 떴다).
+    """
     acknowledgements = _documents_with(documents, "customer_acknowledgement")
     staff = _documents_with(documents, "staff_name")
     if not acknowledgements:
@@ -562,20 +814,328 @@ def check_acknowledgement(documents: list[ParsedDocument]) -> RuleCheck:
             document_excerpt=f"고객 확인: {value}",
             suggestion="고객 확인 또는 서명 증빙을 보완하세요.",
         )
-    status = CheckStatus.PASS if staff else CheckStatus.WARNING
+    if staff:
+        return RuleCheck(
+            rule_id="ACK-001",
+            description="고객 설명 확인 증빙",
+            status=CheckStatus.PASS,
+            document_excerpt=f"고객 확인: {value} / 설명 담당자: {staff[0][1]}",
+        )
+    if non_face_to_face:
+        # 비대면은 사람 담당자 없이 전자적으로 처리되는 것이 정상이다.
+        return RuleCheck(
+            rule_id="ACK-001",
+            description="고객 설명 확인 증빙",
+            status=CheckStatus.PASS,
+            document_excerpt=f"고객 확인: {value} / 비대면 — 설명 담당자 기재 없음(정상)",
+        )
     return RuleCheck(
         rule_id="ACK-001",
         description="고객 설명 확인 증빙",
-        status=status,
-        document_excerpt=f"고객 확인: {value}" + (f" / 담당자: {staff[0][1]}" if staff else ""),
-        suggestion=None if staff else "설명 담당자 정보도 함께 확인하세요.",
+        status=CheckStatus.WARNING,
+        document_excerpt=f"고객 확인: {value} / 설명 담당자 미확인",
+        suggestion="대면 판매는 설명 담당자가 서류에 남아야 사후에 누가 설명했는지 "
+        "입증할 수 있습니다. 설명 담당자 성명을 확인하세요.",
     )
 
+
+
+def _field_object(document: ParsedDocument, field_name: str) -> ParsedField | None:
+    return next((field for field in document.fields if field.name == field_name), None)
+
+
+def _field_evidence(document: ParsedDocument, field_name: str) -> EvidenceRef:
+    """추출 필드와 원문 근거를 하나의 감사 가능한 참조로 묶는다."""
+    field = _field_object(document, field_name)
+    value = field.value if field else None
+    source = field.evidence_text if field else None
+    # 비전 판독 메모는 PDF 텍스트 검색어로 쓸 수 없다. 값이 텍스트 레이어에 있으면
+    # 값으로 재검색하고, 없으면 UI가 '좌표 확인 불가'를 솔직하게 표시한다.
+    search_text = source
+    if source and source.startswith("AI 비전 판독:"):
+        search_text = value
+    return EvidenceRef(
+        evidence_type="field" if value else "missing_field",
+        document_id=document.document_id,
+        field_name=field_name,
+        value=value,
+        excerpt=source or value or f"{field_name} 미확인",
+        search_text=search_text or value,
+        page=field.page if field else None,
+    )
+
+
+def _missing_document_evidence(doc_type: str) -> EvidenceRef:
+    return EvidenceRef(
+        evidence_type="missing_document",
+        field_name=doc_type,
+        excerpt=f"필수 문서 미확인: {REQUIRED_DOC_LABELS.get(doc_type, doc_type)}",
+    )
+
+
+def _dedupe_evidence(items: list[EvidenceRef]) -> list[EvidenceRef]:
+    seen: set[tuple] = set()
+    result: list[EvidenceRef] = []
+    for item in items:
+        key = (
+            item.evidence_type, item.document_id, item.field_name,
+            item.value, item.excerpt, item.page,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _official_action(check: RuleCheck) -> RemediationAction | None:
+    """규칙 판정에 대응하는 공식 조치.
+
+    LLM이 표현을 바꾸더라도 담당자·차단 여부·완료 기준은 동일해야 하므로
+    결정론적 규칙이 소유한다. PASS에는 불필요한 조치를 만들지 않는다.
+    """
+    if check.status is CheckStatus.PASS:
+        return None
+
+    blocking = check.status in (CheckStatus.RISK, CheckStatus.MISSING)
+    actions: dict[str, tuple[str, str, str]] = {
+        "PKG-001": (
+            "판매 담당자",
+            "서류별 상품명·상품코드를 대조하고 혼입 문서를 제거하거나 판매 클래스를 확정하세요.",
+            "모든 판매서류가 동일한 상품·동일한 판매 클래스를 가리키는 상태로 재검증을 통과해야 합니다.",
+        ),
+        "FIT-001": (
+            "판매 담당자",
+            "고객 투자성향을 재진단하거나 해당 성향에서 가입 가능한 위험등급의 상품으로 변경하세요.",
+            "최종 투자성향과 상품 위험등급이 내부 적합성 매트릭스를 통과한 뒤 재검증해야 합니다.",
+        ),
+        "EXP-001": (
+            "판매 담당자",
+            "상품설명서에 원금손실 가능성·위험등급·수수료 및 비용 설명을 보완하세요.",
+            "세 중요사항이 문서 원문에서 확인되고 고객에게 제공된 설명서로 재검증돼야 합니다.",
+        ),
+        "DATE-001": (
+            "판매 담당자",
+            "실제 설명 시점과 계약 시점을 확인하고 잘못 기재된 날짜를 정정하거나 추가 증빙을 확보하세요.",
+            "설명일이 계약일보다 늦지 않으며 두 날짜의 형식과 출처가 확인돼야 합니다.",
+        ),
+        "ACK-001": (
+            "판매 담당자",
+            "고객의 서명·전자확인·녹취 등 설명 이해 확인 증빙과 설명 담당자 정보를 보완하세요.",
+            "유효한 고객 확인값과 필요한 담당자 정보가 문서 또는 전자기록에서 확인돼야 합니다.",
+        ),
+        "ADV-001": (
+            "준법감시 담당자",
+            "원금·수익을 보장하는 단정적 표현을 즉시 중단하고 문구의 사용 경위와 정정 범위를 검토하세요.",
+            "문제 표현이 삭제·정정되고 준법 검토가 완료된 문서로 재검증해야 합니다.",
+        ),
+        "DOC-001": (
+            "판매 담당자",
+            "누락된 판매서류 또는 비대면 전자문서·교부 기록을 확보해 판매건에 첨부하세요.",
+            "필수 4종 서류 또는 인정 가능한 전자적 대체 증빙이 모두 확인돼야 합니다.",
+        ),
+        "REC-001": (
+            "영업점 관리자",
+            "해당 판매건의 녹취 대상 여부를 확인하고 실제 녹취 파일과 보관 기록을 점검하세요.",
+            "적용 대상이면 녹취 파일의 존재·식별번호·보관 위치가 확인돼야 합니다.",
+        ),
+    }
+    role, required, criteria = actions.get(
+        check.rule_id,
+        ("판매 담당자", check.suggestion or "관련 서류와 내부 기준을 확인하세요.", "보완 후 재검증을 통과해야 합니다."),
+    )
+    return RemediationAction(
+        required_action=required,
+        responsible_role=role,
+        sale_blocking=blocking,
+        completion_criteria=criteria,
+    )
+
+
+def _structured_evidence(
+    check: RuleCheck,
+    documents: list[ParsedDocument],
+    profile_min_grade: dict[str, int] | None = None,
+    elderly_investor: bool = False,
+    non_face_to_face: bool = False,
+) -> list[EvidenceRef]:
+    """기존 판정 로직을 바꾸지 않고, 그 판정에 사용된 입력을 구조화한다."""
+    items: list[EvidenceRef] = []
+
+    if check.rule_id == "PKG-001":
+        codes = _documents_with(documents, "product_code")
+        names = _documents_with(documents, "product_name")
+        selected = codes if len(codes) >= 2 else names
+        field_name = "product_code" if len(codes) >= 2 else "product_name"
+        items.extend(_field_evidence(document, field_name) for document, _ in selected)
+        if len(selected) < 2:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                field_name=field_name,
+                excerpt="비교 가능한 상품 식별값이 2개 미만입니다.",
+            ))
+
+    elif check.rule_id == "FIT-001":
+        profiles = _documents_with(documents, "customer_profile")
+        risks = _documents_with(documents, "product_risk_level")
+        table = profile_min_grade or DEFAULT_PROFILE_MIN_ALLOWED_GRADE
+        if profiles:
+            profile_doc, _ = max(
+                profiles, key=lambda pair: (table.get(pair[1], 0), pair[0].document_id)
+            )
+            items.append(_field_evidence(profile_doc, "customer_profile"))
+        else:
+            docs = [d for d in documents if d.doc_type == "suitability_form"]
+            items.extend(_field_evidence(d, "customer_profile") for d in docs)
+            if not docs:
+                items.append(_missing_document_evidence("suitability_form"))
+        if risks:
+            risk_doc, _ = min(
+                risks, key=lambda pair: (_risk_number(pair[1]) or 99, pair[0].document_id)
+            )
+            items.append(_field_evidence(risk_doc, "product_risk_level"))
+        else:
+            docs = [d for d in documents if d.doc_type == "product_description"]
+            items.extend(_field_evidence(d, "product_risk_level") for d in docs)
+            if not docs:
+                items.append(_missing_document_evidence("product_description"))
+
+    elif check.rule_id == "EXP-001":
+        products = sorted(
+            [d for d in documents if d.doc_type == "product_description"],
+            key=lambda d: d.document_id,
+        )
+        if not products:
+            items.append(_missing_document_evidence("product_description"))
+        field_names = (
+            "principal_loss_explained", "risk_level_explained", "fees_explained"
+        )
+        for document in products:
+            items.extend(_field_evidence(document, name) for name in field_names)
+
+    elif check.rule_id == "ADV-001":
+        targets = sorted(
+            [d for d in documents if d.doc_type in _ADVICE_DOC_TYPES],
+            key=lambda d: d.document_id,
+        )
+        for document in targets:
+            for claim in find_guarantee_claims(document.raw_text)[:3]:
+                items.append(EvidenceRef(
+                    evidence_type="text",
+                    document_id=document.document_id,
+                    excerpt=claim,
+                    search_text=claim,
+                ))
+        if check.status is not CheckStatus.PASS and not items:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                excerpt="검사 가능한 상품설명서·가입신청서·설명확인서가 부족합니다.",
+            ))
+
+    elif check.rule_id == "DOC-001":
+        present = {d.doc_type for d in documents}
+        for doc_type in REQUIRED_DOC_TYPES:
+            if doc_type not in present:
+                items.append(_missing_document_evidence(doc_type))
+        if non_face_to_face and check.status is CheckStatus.WARNING:
+            for document, _ in _documents_with(documents, "customer_acknowledgement"):
+                items.append(_field_evidence(document, "customer_acknowledgement"))
+
+    elif check.rule_id == "DATE-001":
+        explanations = _documents_with(documents, "explanation_date")
+        contracts = _documents_with(documents, "contract_date")
+        valid_explanations = [
+            (parse_iso_date(value), document)
+            for document, value in explanations if parse_iso_date(value)
+        ]
+        valid_contracts = [
+            (parse_iso_date(value), document)
+            for document, value in contracts if parse_iso_date(value)
+        ]
+        if valid_explanations:
+            _, document = max(valid_explanations, key=lambda pair: (pair[0], pair[1].document_id))
+            items.append(_field_evidence(document, "explanation_date"))
+        elif explanations:
+            items.append(_field_evidence(explanations[0][0], "explanation_date"))
+        else:
+            ack_docs = [d for d in documents if d.doc_type == "acknowledgement"]
+            items.extend(_field_evidence(d, "explanation_date") for d in ack_docs)
+        if valid_contracts:
+            _, document = min(valid_contracts, key=lambda pair: (pair[0], pair[1].document_id))
+            items.append(_field_evidence(document, "contract_date"))
+        elif contracts:
+            items.append(_field_evidence(contracts[0][0], "contract_date"))
+        else:
+            date_docs = [d for d in documents if d.doc_type in ("application", "acknowledgement")]
+            items.extend(_field_evidence(d, "contract_date") for d in date_docs)
+
+    elif check.rule_id == "ACK-001":
+        acknowledgements = _documents_with(documents, "customer_acknowledgement")
+        negatives = [pair for pair in acknowledgements if _is_negative_ack(pair[1])]
+        selected = negatives[0] if negatives else (acknowledgements[0] if acknowledgements else None)
+        if selected:
+            items.append(_field_evidence(selected[0], "customer_acknowledgement"))
+        else:
+            ack_docs = [d for d in documents if d.doc_type in ("acknowledgement", "application")]
+            items.extend(_field_evidence(d, "customer_acknowledgement") for d in ack_docs)
+        staff = _documents_with(documents, "staff_name")
+        if staff:
+            items.append(_field_evidence(staff[0][0], "staff_name"))
+        elif check.status is CheckStatus.WARNING:
+            for document in documents:
+                if _field_object(document, "staff_name") is not None:
+                    items.append(_field_evidence(document, "staff_name"))
+
+    elif check.rule_id == "REC-001":
+        risks = _documents_with(documents, "product_risk_level")
+        for document, value in risks:
+            grade = _risk_number(value)
+            if grade in RECORDING_RISK_GRADES or check.status is CheckStatus.PASS:
+                items.append(_field_evidence(document, "product_risk_level"))
+        suitability = check_suitability(documents, profile_min_grade=profile_min_grade)
+        if suitability.status is CheckStatus.RISK:
+            profiles = _documents_with(documents, "customer_profile")
+            if profiles:
+                items.append(_field_evidence(profiles[0][0], "customer_profile"))
+        if elderly_investor:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                field_name="elderly_investor",
+                value="예",
+                excerpt="검토자가 만 65세 이상 투자자로 표시함",
+            ))
+        if check.status is CheckStatus.WARNING:
+            items.append(EvidenceRef(
+                evidence_type="manual_review",
+                field_name="recording_record",
+                excerpt="이 도구는 녹취 파일 자체를 판독하지 않으므로 보관 기록 확인이 필요합니다.",
+            ))
+
+    return _dedupe_evidence(items)
+
+
+def _enrich_check(
+    check: RuleCheck,
+    documents: list[ParsedDocument],
+    profile_min_grade: dict[str, int] | None = None,
+    elderly_investor: bool = False,
+    non_face_to_face: bool = False,
+) -> RuleCheck:
+    check.evidence_items = _structured_evidence(
+        check,
+        documents,
+        profile_min_grade=profile_min_grade,
+        elderly_investor=elderly_investor,
+        non_face_to_face=non_face_to_face,
+    )
+    check.action_plan = _official_action(check)
+    return check
 
 def run_package_checks(
     documents: list[ParsedDocument],
     profile_min_grade: dict[str, int] | None = None,
     elderly_investor: bool = False,
+    non_face_to_face: bool = False,
 ) -> list[RuleCheck]:
     # profile_min_grade: 적합성 등급 매트릭스(규정 파라미터). 개정 시 이 값을 바꿔
     # 재검증하면 판정 변화를 확인할 수 있다(규정 개정 재검증). 기본은 현행 매트릭스.
@@ -583,11 +1143,25 @@ def run_package_checks(
         check_product_identity(documents),
         check_suitability(documents, profile_min_grade=profile_min_grade),
         check_dates(documents),
-        check_acknowledgement(documents),
+        check_acknowledgement(documents, non_face_to_face=non_face_to_face),
     ]
-    product_documents = [document for document in documents if document.doc_type == "product_description"]
     checks.append(check_explanations(documents))
     checks.append(check_unfair_solicitation(documents))
-    checks.append(check_document_set(documents))
-    checks.append(check_recording_requirement(documents, elderly_investor=elderly_investor))
-    return checks
+    checks.append(check_document_set(documents, non_face_to_face=non_face_to_face))
+    checks.append(
+        check_recording_requirement(
+            documents,
+            elderly_investor=elderly_investor,
+            profile_min_grade=profile_min_grade,
+        )
+    )
+    return [
+        _enrich_check(
+            check,
+            documents,
+            profile_min_grade=profile_min_grade,
+            elderly_investor=elderly_investor,
+            non_face_to_face=non_face_to_face,
+        )
+        for check in checks
+    ]

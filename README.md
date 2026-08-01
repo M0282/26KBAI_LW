@@ -21,15 +21,36 @@ KB국민은행 제8회 AI Challenge 출품작.
 
 ## 빠른 시작
 
-**요구 사항: Python 3.10 이상** (개발·검증은 3.12 기준)
+**요구 사항: Python 3.10 이상** (개발·검증은 3.12 기준). 그 외 준비물은 없습니다.
+
+### Windows — `run.bat` 더블클릭
+
+가상환경 생성, 패키지 설치, 앱 실행까지 한 번에 처리하고 브라우저를 엽니다.
+처음 실행은 패키지를 받느라 몇 분 걸리고, 두 번째부터는 바로 뜹니다.
+
+### 직접 실행하거나 macOS·Linux인 경우
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate        # Windows
+py -3.12 scripts/launch.py      # Windows
+python3 scripts/launch.py       # macOS · Linux
+```
+
+`scripts/launch.py` 가 `.venv` 를 만들고 의존성을 설치한 뒤 앱을 띄웁니다.
+
+> **`py -3` 은 쓰지 마세요.** 구버전 Windows 런처는 3.9를 3.12보다 높다고 판단해
+> 지원이 끝난 런타임을 고릅니다. `run.bat` 과 위 명령은 이 문제를 피해 갑니다.
+
+### 수동 설치
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1     # 실행 정책 오류가 나면: .venv\Scripts\activate.bat
 pip install -r requirements.txt
-copy .env.example .env         # ANTHROPIC_API_KEY 채우기 (.env는 커밋 금지)
 streamlit run app/main.py
 ```
+
+API 키는 `.env` 에 들어 있습니다(제출본에 포함). 직접 채우려면 `.env.example` 을
+`.env` 로 복사한 뒤 `ANTHROPIC_API_KEY` 를 넣으세요.
 
 비정형 서류에서 판정에 필요한 값을 읽으려면 `ANTHROPIC_API_KEY` 가 필요합니다.
 키가 없으면 문서유형·위험등급을 신뢰할 수 있게 추출하지 못해 검증을 중단합니다
@@ -53,7 +74,7 @@ src/common/    공용 스키마 = 모듈 간 인터페이스 계약 (변경 시 
 app/main.py    Streamlit 검증 화면
 data/          샘플 서류·법령 조문 (민감/대용량 데이터 커밋 금지)
 scripts/       데모 생성·검증 하니스·감사·기술설명서 생성
-tests/         회귀 테스트 45건
+tests/         회귀 테스트 83건
 docs/          계획 문서 · 기술설명서(PPTX)
 ```
 

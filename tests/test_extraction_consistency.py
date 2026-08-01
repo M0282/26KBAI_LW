@@ -189,11 +189,50 @@ def test_confident_rule_classification_detects_acknowledgement():
 
 
 def test_confident_classification_abstains_when_ambiguous():
-    """여러 유형 키워드가 섞이면 확신하지 않는다(LLM 판단을 뒤집지 않는다)."""
+    """제목이 없고 여러 유형 어휘만 섞이면 확신하지 않는다(LLM 판단을 뒤집지 않는다)."""
     from src.parser.financial_extractor import confident_rule_doc_type
 
-    mixed = "상품설명서 위험등급 원금손실 수수료 · 투자성향 적합성 진단 · 고객 확인 서명"
+    mixed = "위험등급 원금손실 수수료 · 투자성향 적합성 진단 · 고객 확인 서명"
     assert confident_rule_doc_type(mixed) is None
+
+
+# --- 제목이 본문 빈도를 이긴다 ---
+# 실측: ELS·DLS 상품설명서는 청약 절차를 길게 설명해 '청약·신청금액·가입일'이
+# 상품설명서 어휘보다 많이 나온다. 본문 빈도로 가르면 3건(대우 DLS611·
+# 미래에셋 ELS4716·신한 ELS핵심설명서)이 전부 가입신청서로 뒤집혔다.
+def test_title_beats_body_keyword_counts():
+    from src.parser.financial_extractor import classify_document_rule_based, confident_rule_doc_type
+
+    els = (
+        "간이투자설명서\n제611회 파생결합증권(DLS)\n"
+        + "청약 청약 청약 가입일 신청금액 계약일 가입신청 " * 6
+    )
+    assert classify_document_rule_based(els) == "application"   # 본문 빈도는 뒤집힌다
+    assert confident_rule_doc_type(els) == "product_description"
+
+
+def test_customer_signature_phrase_is_not_a_title():
+    """'고객 확인 서명'은 공백을 지우면 '고객확인서'가 된다 — 제목으로 오인하면 안 된다."""
+    from src.parser.financial_extractor import title_doc_type
+
+    assert title_doc_type("가입신청서\n고객 확인 서명 란") == "application"
+
+
+def test_acknowledgement_title_wins_when_other_types_also_score():
+    """다른 유형 점수가 0이 아니어도 제목이 분명하면 확신한다.
+
+    실측: 설명확인서에서 acknowledgement 9점인데 product_description 4점이 있어
+    예전 조건(나머지 전부 0)이 침묵했고, LLM의 오답이 그대로 최종 유형이 됐다.
+    """
+    from src.parser.financial_extractor import classify_scores, confident_rule_doc_type
+
+    text = (
+        "상품설명 확인서\n설명일: 2026-07-15\n설명 담당자: 이판매\n"
+        "상품설명서 교부 여부 확인 · 위험등급 안내 · 수수료 안내\n가입신청 내용 확인\n"
+    )
+    scores = classify_scores(text)
+    assert scores["product_description"] > 0 and scores["application"] > 0
+    assert confident_rule_doc_type(text) == "acknowledgement"
 
 
 # --- 고객확인 값 표준화 ---
@@ -210,3 +249,95 @@ def test_acknowledgement_positive_value_is_kept():
     from src.parser.financial_extractor import SIGNED, UNSIGNED, normalize_field
 
     assert normalize_field("customer_acknowledgement", SIGNED) != UNSIGNED
+
+
+def test_signed_values_containing_없음_are_not_flagged_unsigned():
+    """'특이사항 없음'처럼 정상 서명 문구에도 '없음'이 들어간다 — 오탐을 내면 안 된다."""
+    from src.parser.financial_extractor import states_unsigned
+
+    for value in ("확인함, 특이사항 없음", "서명 완료 / 누락 없음", "이의 없음 확인 서명"):
+        assert states_unsigned(value) is False, value
+
+
+def test_unsigned_markers_are_still_detected():
+    from src.parser.financial_extractor import states_unsigned
+
+    for value in ("미서명", "서명 없음", "미확인", "아니오", "(공란)", "없음", "미기재"):
+        assert states_unsigned(value) is True, value
+
+
+def test_two_digit_year_is_not_turned_into_year_26():
+    """'26.07.15'를 서기 26년으로 만들면 계약 이후 설명을 정상으로 통과시킨다."""
+    from src.parser.financial_extractor import _normalize_date, parse_iso_date
+
+    assert _normalize_date("26.07.15") == "26.07.15"
+    assert parse_iso_date(_normalize_date("26.07.15")) is None
+    # 네 자리 연도는 그대로 정규화된다.
+    assert _normalize_date("2026.07.15") == "2026-07-15"
+
+
+def _product_doc(text):
+    from src.common.schemas import ParsedDocument
+    from src.parser.financial_extractor import extract_rule_based
+
+    parsed = ParsedDocument(document_id="p.pdf", doc_type="product_description",
+                            raw_text=text, fields=[])
+    result = extract_rule_based(parsed)
+    return ParsedDocument(document_id="p.pdf", doc_type="product_description",
+                          raw_text=text, fields=result.fields)
+
+
+def test_generic_cost_words_do_not_count_as_fee_explanation():
+    """'비용'·'보수'가 엉뚱한 문맥으로만 나와도 설명 이행으로 보던 미탐."""
+    from src.verify.financial_rules import _missing_explanations
+
+    for text in (
+        "상품설명서\n위험등급: 1등급\n원금손실 가능.\n본 안내장 제작 비용은 당사가 부담합니다.",
+        "상품설명서\n위험등급: 1등급\n원금손실 가능.\n담당자: 김보수",
+    ):
+        assert "수수료·비용" in _missing_explanations(_product_doc(text)), text
+
+
+def test_real_fee_wording_is_still_detected():
+    """실물 설명서가 쓰는 복합어(판매수수료·운용보수)는 그대로 잡혀야 한다."""
+    from src.verify.financial_rules import _missing_explanations
+
+    text = ("상품설명서\n위험등급: 1등급\n원금손실: 원금이 보장되지 않습니다.\n"
+            "수수료: 선취판매수수료 1.0%, 운용보수 연 0.7%")
+    assert _missing_explanations(_product_doc(text)) == []
+
+
+def test_vision_grade_rejects_answers_that_only_mention_numbers():
+    """비전이 '등급을 못 찾았다'고 답한 것을 등급으로 읽으면 판정이 뒤집힌다."""
+    from src.parser.financial_extractor import parse_vision_grade
+
+    # 등급을 못 찾았다는 답 — 숫자가 섞여 있어도 채택하면 안 된다.
+    assert parse_vision_grade("표시 없음(1~6 중 판단 불가)") is None
+    assert parse_vision_grade("6개 항목 중 표시 없음") is None
+    assert parse_vision_grade("없음") is None
+    assert parse_vision_grade(None) is None
+    assert parse_vision_grade(True) is None
+    assert parse_vision_grade(0) is None
+    assert parse_vision_grade(7) is None
+
+
+def test_vision_grade_accepts_a_bare_grade():
+    from src.parser.financial_extractor import parse_vision_grade
+
+    assert parse_vision_grade("3") == "3등급"
+    assert parse_vision_grade("3등급") == "3등급"
+    assert parse_vision_grade(" 5 ") == "5등급"
+    assert parse_vision_grade(1) == "1등급"
+
+
+def test_suitability_form_does_not_carry_explanation_date():
+    """진단표의 날짜는 '투자성향 기준일'이지 설명일이 아니다.
+
+    자리를 열어 두면 LLM이 회차마다 다르게 판단하고, 그 값 하나로
+    DATE-001이 통과↔위험으로 뒤집힌다(실측: 실물 진단표 3회 중 2회만 값이 나옴).
+    """
+    from src.parser.financial_extractor import DOC_TYPE_FIELDS
+
+    assert "explanation_date" not in DOC_TYPE_FIELDS["suitability_form"]
+    # 설명일은 설명확인서에서 받는다.
+    assert "explanation_date" in DOC_TYPE_FIELDS["acknowledgement"]
