@@ -10,7 +10,7 @@
 실행:
     py -3 -m pip install python-pptx
     py -3 -m scripts.make_deck
-결과: docs/기술설명서_초안.pptx
+결과: docs/기술설명서.pptx
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
-OUT = Path("docs/기술설명서_초안.pptx")
+OUT = Path("docs/기술설명서.pptx")
 SHOTS = Path("docs/screens")
 # 캡처 원본은 3200x2400(사이드바 포함). 슬라이드에는 본문만 크게 싣는다.
 SIDEBAR_FRACTION = 0.19
